@@ -1,0 +1,7 @@
+{
+    "name": "CustomFavorites",
+    "description": "Replaces Discord's Favorites with a local, unlimited version, with server icons and import from the official Favorites",
+    "authors": [{ "name": "Johnnycyan", "id": "258020906805362688" }],
+    "main": "index.js",
+    "vendetta": { "icon": "ic_star_filled" }
+}
