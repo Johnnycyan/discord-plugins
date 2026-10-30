@@ -1,0 +1,15 @@
+services:
+  customfavorites-sync:
+    image: ghcr.io/johnnycyan/customfavorites-sync:latest
+    restart: unless-stopped
+    environment:
+      # Put SYNC_TOKEN=... in a .env file next to this one (generate it with `openssl rand -hex 32`)
+      SYNC_TOKEN: ${SYNC_TOKEN:?Set SYNC_TOKEN in .env}
+    ports:
+      # Only reachable from this machine; put a reverse proxy with HTTPS in front
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - data:/data
+
+volumes:
+  data:

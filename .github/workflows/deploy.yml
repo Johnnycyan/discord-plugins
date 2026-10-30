@@ -3,6 +3,9 @@ name: Build and deploy plugins
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "sync-server/**"
+      - ".github/workflows/sync-server-image.yml"
   workflow_dispatch:
 
 permissions:

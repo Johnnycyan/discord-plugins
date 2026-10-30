@@ -2,7 +2,18 @@
 
 Keeps CustomFavorites in sync between your Equicord and Kettu installs. One small Node.js file with no dependencies, meant to be self-hosted: one server per person, so there are no accounts. Every device uses the same server URL and token.
 
-## Run it
+## Run it with Docker
+
+The image is `ghcr.io/johnnycyan/customfavorites-sync` (amd64 and arm64), rebuilt on every change. Put [compose.yaml](compose.yaml) in a folder on the server, then:
+
+```sh
+echo "SYNC_TOKEN=$(openssl rand -hex 32)" > .env   # keep this; you'll paste it into each plugin
+docker compose up -d
+```
+
+The server then listens on `127.0.0.1:8787` and keeps its data in the `data` volume. Put a reverse proxy with HTTPS in front (see below). To update: `docker compose pull && docker compose up -d`.
+
+## Run it without Docker
 
 Needs Node.js 18 or newer.
 
@@ -18,7 +29,7 @@ node server.mjs
 | `HOST` | `127.0.0.1` | Only listens locally; expose it through a reverse proxy with HTTPS. |
 | `DATA_FILE` | `./favorites.json` | Where the favorites are stored. Back this file up if you care about it. |
 
-### HTTPS
+## HTTPS
 
 Use HTTPS. Discord on Android refuses plain HTTP, Discord web refuses it from an HTTPS page, and the token would travel in the clear. With [Caddy](https://caddyserver.com), which gets certificates automatically:
 
@@ -28,7 +39,7 @@ favorites.example.com {
 }
 ```
 
-### systemd
+## Keep it running without Docker (systemd)
 
 `/etc/systemd/system/customfavorites-sync.service`:
 
