@@ -1,0 +1,31 @@
+.vc-channel-collapser-wrapper {
+    padding: 8px 8px 4px 8px;
+}
+
+.vc-channel-collapser-container {
+    display: flex;
+    justify-content: center;
+    width: 100%;
+}
+
+.vc-channel-collapser-button {
+    width: 100%;
+    font-size: 12px;
+    height: 28px;
+    padding: 4px 16px;
+    border: none;
+    border-radius: 3px;
+    background-color: var(--background-base-lowest);
+    color: white;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.17s ease;
+}
+
+.vc-channel-collapser-button:hover {
+    background-color: var(--background-base-lower);
+}
+
+.vc-channel-collapser-button:active {
+    background-color: var(--background-base-low);
+}

@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { findRestoreIndex, orderedChildren, PlacementHistory, updatePlacementHistory } from "./placement";
-import { createSync, SyncData, SyncMeta, SyncStatus } from "./sync";
+import { findRestoreIndex, orderedChildren, PlacementHistory, updatePlacementHistory } from "../../../shared/CustomFavorites/placement";
+import { createSync, SyncData, SyncMeta, SyncStatus } from "../../../shared/CustomFavorites/sync";
 
 declare const vendetta: any;
 

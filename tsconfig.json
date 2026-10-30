@@ -1,0 +1,11 @@
+{
+    // equicord-plugins is junctioned into Equicord/src/userplugins, and esbuild resolves the real path,
+    // so Equicord's path aliases (@api, @utils, ...) must be reachable from here for both the build and the editor
+    "extends": "./Equicord/tsconfig.json",
+    "include": [
+        "equicord-plugins/**/*",
+        "shared/**/*",
+        "Equicord/src/globals.d.ts",
+        "Equicord/src/modules.d.ts"
+    ]
+}

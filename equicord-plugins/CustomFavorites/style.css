@@ -1,0 +1,29 @@
+/* Size comes from Discord's own icon classes, matching DM avatars */
+.vc-cf-guild-icon {
+    border-radius: 50%;
+    object-fit: cover;
+}
+
+.vc-cf-guild-acronym {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: 7px;
+    font-weight: 600;
+    color: var(--text-default, var(--text-normal));
+    background: var(--background-mod-strong, var(--background-modifier-accent));
+}
+
+.vc-cf-manage {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.vc-cf-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}

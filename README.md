@@ -1,34 +1,38 @@
-# Kettu plugins
+# Discord plugins
 
-Plugins for [Kettu](https://github.com/C0C0B01/Kettu) (and other Vendetta-compatible Discord mobile mods).
+My Discord client plugins for [Equicord](https://github.com/Equicord/Equicord) (desktop and web) and [Kettu](https://github.com/C0C0B01/Kettu) (Android).
 
-## Install
+## Layout
 
-In Discord, open **Settings → Plugins → +** and paste the plugin's URL.
-
-| Plugin | URL |
+| Path | What |
 |---|---|
-| CustomFavorites | `https://johnnycyan.github.io/kettu-plugins/CustomFavorites/` |
+| `equicord-plugins/<Name>/` | Equicord user plugins. Only plugin folders go here: Equicord treats every top-level entry as a plugin. |
+| `kettu-plugins/` | Kettu plugins and their esbuild build. See [kettu-plugins/README.md](kettu-plugins/README.md). |
+| `shared/<Name>/` | Platform-free code used by both versions of a plugin (no `@api`, `@webpack` or Vendetta imports). |
+| `sync-server/` | Self-hosted sync server for CustomFavorites. See [sync-server/README.md](sync-server/README.md). |
+| `Equicord/` | Upstream Equicord clone used to build, not committed. |
+| `_old/` | Local archive, not committed. |
 
-## CustomFavorites
+## Setup
 
-Replaces Discord's Favorites with a local, unlimited version while keeping Discord's own UI.
+Clone this repo, then clone Equicord inside it and link the plugins in. From `cmd` in the repo root:
 
-- No favorites limit (Discord allows 3 free, 200 with Nitro).
-- Your favorites are stored on the device by the plugin. Discord's synced Favorites are never changed.
-- Import from Discord's Favorites (offered once on first start, or any time from the plugin settings), replacing or merging.
-- Export to and import from the clipboard as JSON.
-- Shows the server icon next to favorited server channels.
-- Remembers where a channel sat in a category: when you move it out with **Move to…** and later move it back, it returns to its old spot instead of the bottom.
-- Optional sync with the Equicord version through a self-hosted server: see [sync-server](sync-server/README.md).
-
-## Development
-
-```sh
-npm install
-npm run build   # or: npm run watch
+```bat
+git clone https://github.com/Equicord/Equicord
+rmdir /s /q Equicord\src\userplugins
+mklink /J Equicord\src\userplugins equicord-plugins
+cd Equicord && pnpm install
 ```
 
-Each plugin lives in `plugins/<Name>/` with an `index.tsx` and a `manifest.json`. CustomFavorites' `placement.ts` and `sync.ts` are shared with the Equicord version; keep the copies identical. The build writes `dist/<Name>/manifest.json` and `dist/<Name>/index.js`, and GitHub Actions publishes `dist/` to GitHub Pages on every push to `main`.
+`tsconfig.json` in the repo root extends Equicord's, so the `@api`, `@utils`, ... aliases resolve for both the Equicord build (esbuild follows the junction to the real path) and the editor.
 
-Kettu runs plugins through Hermes `eval`, where `let`/`const` inside loops are function scoped. Never close over a loop variable; use array methods instead.
+## Building
+
+- **Equicord:** `cd Equicord && pnpm build` (or `pnpm watch`). Update upstream with `git pull` in `Equicord/`; the plugins are untouched.
+- **Kettu:** `cd kettu-plugins && npm install && npm run build`. Pushing to `main` deploys `kettu-plugins/dist` to GitHub Pages when `kettu-plugins/` or `shared/` changes.
+
+## Adding a plugin
+
+- **Equicord:** create `equicord-plugins/<Name>/index.ts(x)`.
+- **Kettu:** create `kettu-plugins/plugins/<Name>/index.tsx` and `manifest.json`.
+- **Both:** put the logic that does not touch the client in `shared/<Name>/` and import it relatively from each version.

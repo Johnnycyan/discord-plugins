@@ -1,2 +1,8 @@
 node_modules/
 dist/
+
+# Upstream Equicord clone used to build equicord-plugins (src/userplugins is a junction to ../equicord-plugins)
+/Equicord/
+
+# Local archive, not published
+/_old/
