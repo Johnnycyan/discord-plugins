@@ -20,6 +20,7 @@ Replaces Discord's Favorites with a local, unlimited version while keeping Disco
 - Export to and import from the clipboard as JSON.
 - Shows the server icon next to favorited server channels.
 - Remembers where a channel sat in a category: when you move it out with **Move to…** and later move it back, it returns to its old spot instead of the bottom.
+- Optional sync with the Equicord version through a self-hosted server: see [sync-server](sync-server/README.md).
 
 ## Development
 
@@ -28,6 +29,6 @@ npm install
 npm run build   # or: npm run watch
 ```
 
-Each plugin lives in `plugins/<Name>/` with an `index.tsx` and a `manifest.json`. The build writes `dist/<Name>/manifest.json` and `dist/<Name>/index.js`, and GitHub Actions publishes `dist/` to GitHub Pages on every push to `main`.
+Each plugin lives in `plugins/<Name>/` with an `index.tsx` and a `manifest.json`. CustomFavorites' `placement.ts` and `sync.ts` are shared with the Equicord version; keep the copies identical. The build writes `dist/<Name>/manifest.json` and `dist/<Name>/index.js`, and GitHub Actions publishes `dist/` to GitHub Pages on every push to `main`.
 
 Kettu runs plugins through Hermes `eval`, where `let`/`const` inside loops are function scoped. Never close over a loop variable; use array methods instead.

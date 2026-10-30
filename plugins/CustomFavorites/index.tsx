@@ -4,6 +4,7 @@
  */
 
 import { findRestoreIndex, orderedChildren, PlacementHistory, updatePlacementHistory } from "./placement";
+import { createSync, SyncData, SyncMeta, SyncStatus } from "./sync";
 
 declare const vendetta: any;
 
@@ -54,6 +55,9 @@ interface PluginStorage {
     placementHistory?: PlacementHistory;
     offeredImport?: boolean;
     showGuildIcons?: boolean;
+    syncUrl?: string;
+    syncToken?: string;
+    syncMeta?: SyncMeta | null;
 }
 
 const storage: PluginStorage = plugin.storage;
@@ -126,12 +130,77 @@ function getState(): FavoritesState {
     return cache;
 }
 
-function setState(next: FavoritesState) {
+function writeState(next: FavoritesState) {
     cache = clone(next);
     storage.data = clone(next);
     version++;
     FavoriteStore.emitChange();
     CategoryCollapseStore.emitChange();
+}
+
+/** A change made on this device: save it and upload it to the sync server */
+function setState(next: FavoritesState) {
+    writeState(next);
+    sync.notifyLocalChange();
+}
+
+// ---------- Sync ----------
+
+let syncStatus: SyncStatus = { state: "off" };
+const syncStatusListeners = new Set<() => void>();
+
+const sync = createSync({
+    getConfig: () => ({ url: (storage.syncUrl ?? "").trim(), token: (storage.syncToken ?? "").trim() }),
+    getLocal: (): SyncData => clone({ state: getState() as any, placementHistory: storage.placementHistory ?? {} }),
+    applyRemote(data) {
+        writeState(normalize(data.state) ?? emptyState());
+        storage.placementHistory = clone(data.placementHistory ?? {}) as PlacementHistory;
+    },
+    loadMeta: () => storage.syncMeta ? clone(storage.syncMeta) : null,
+    saveMeta(meta) {
+        storage.syncMeta = meta ? clone(meta) : null;
+    },
+    async request(method, url, token, body, timeoutMs = 15_000) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            return await fetch(url, {
+                method,
+                signal: controller.signal,
+                headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+                body: body === undefined ? undefined : JSON.stringify(body),
+            });
+        } finally {
+            clearTimeout(timer);
+        }
+    },
+    chooseFirstSync: (local, remote) => new Promise(resolve => {
+        const count = (data: SyncData) => countEntries(data.state as any);
+        const here = count(local), there = count(remote);
+        showConfirmationAlert({
+            title: "Sync favorites",
+            content: `The sync server already has favorites (${there.channels} channels, ${there.categories} categories), and so does this device (${here.channels} channels, ${here.categories} categories). Which should be kept? The other copy is replaced.`,
+            confirmText: "Use server's",
+            onConfirm: () => resolve("server"),
+            cancelText: "Upload this device's",
+            onCancel: () => resolve("device"),
+            isDismissable: false,
+        });
+    }),
+    onStatus(status) {
+        syncStatus = status.state === "ok" ? status : { ...status, lastSync: syncStatus.lastSync };
+        syncStatusListeners.forEach(listener => listener());
+    },
+    log: (...args) => logger.log(...args),
+});
+
+function describeSyncStatus(status: SyncStatus) {
+    switch (status.state) {
+        case "off": return "Off. Enter a server URL and token to sync.";
+        case "syncing": return "Connecting...";
+        case "ok": return `Synced${status.lastSync ? ` at ${new Date(status.lastSync).toLocaleTimeString()}` : ""}`;
+        case "error": return `Error: ${status.message ?? "unknown"}`;
+    }
 }
 
 function getOfficialState(): FavoritesState | null {
@@ -370,6 +439,52 @@ const ICON_GAP = 8;
 
 // ---------- Settings ----------
 
+function SyncSection() {
+    const [url, setUrl] = React.useState(storage.syncUrl ?? "");
+    const [token, setToken] = React.useState(storage.syncToken ?? "");
+    const [status, setStatus] = React.useState(syncStatus);
+
+    React.useEffect(() => {
+        const listener = () => setStatus(syncStatus);
+        syncStatusListeners.add(listener);
+        return () => { syncStatusListeners.delete(listener); };
+    }, []);
+
+    const connect = () => {
+        const nextUrl = url.trim();
+        if (nextUrl && !/^https?:\/\//.test(nextUrl)) {
+            notify("Invalid URL", "The sync server URL must start with https:// (or http:// on a local network).");
+            return;
+        }
+        storage.syncUrl = nextUrl;
+        storage.syncToken = token.trim();
+        sync.start();
+    };
+
+    return (
+        <Forms.FormSection title="Sync">
+            <Forms.FormInput
+                title="Server URL"
+                placeholder="https://favorites.example.com"
+                value={url}
+                onChange={setUrl}
+                autoCapitalize="none"
+                autoCorrect={false}
+            />
+            <Forms.FormInput
+                title="Token"
+                placeholder="SYNC_TOKEN from the server"
+                value={token}
+                onChange={setToken}
+                secureTextEntry
+                autoCapitalize="none"
+                autoCorrect={false}
+            />
+            <Forms.FormRow label="Save and sync now" subLabel={describeSyncStatus(status)} onPress={connect} />
+        </Forms.FormSection>
+    );
+}
+
 function SettingsPage() {
     const [, forceUpdate] = React.useReducer((x: number) => x + 1, 0);
     const [showIcons, setShowIcons] = React.useState(storage.showGuildIcons !== false);
@@ -395,6 +510,7 @@ function SettingsPage() {
                     }}
                 />
             </Forms.FormSection>
+            <SyncSection />
             <Forms.FormSection title="Import and export">
                 <Forms.FormRow label="Import from Discord (replace)" subLabel="Replace your custom Favorites with Discord's" onPress={() => confirmReplaceImport(forceUpdate)} />
                 <Forms.FormRow label="Import from Discord (merge)" subLabel="Add Discord's Favorites you don't have yet" onPress={() => { importOfficial("merge"); forceUpdate(); }} />
@@ -594,6 +710,7 @@ export default {
         version++;
         FavoriteStore.emitChange();
         CategoryCollapseStore.emitChange();
+        sync.start();
 
         // Discord's settings may not be loaded yet when plugins start
         if (!maybeOfferImport()) {
@@ -609,6 +726,7 @@ export default {
     },
 
     onUnload() {
+        sync.stop();
         stopWaitingForSettings?.();
         unpatches.forEach(unpatch => unpatch());
         unpatches = [];
