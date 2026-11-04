@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - "kettu-plugins/**"
-      - "shared/**"
+      - "equicord-plugins/**"
       - ".github/workflows/deploy.yml"
   workflow_dispatch:
 

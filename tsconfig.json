@@ -4,7 +4,6 @@
     "extends": "./Equicord/tsconfig.json",
     "include": [
         "equicord-plugins/**/*",
-        "shared/**/*",
         "Equicord/src/globals.d.ts",
         "Equicord/src/modules.d.ts"
     ]

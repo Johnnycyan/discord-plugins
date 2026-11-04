@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { findRestoreIndex, orderedChildren, PlacementHistory, updatePlacementHistory } from "../../../shared/CustomFavorites/placement";
-import { createSync, SyncData, SyncMeta, SyncStatus } from "../../../shared/CustomFavorites/sync";
+import { findRestoreIndex, orderedChildren, PlacementHistory, updatePlacementHistory } from "../../../equicord-plugins/CustomFavorites/placement";
+import { createSync, SyncData, SyncMeta, SyncStatus } from "../../../equicord-plugins/CustomFavorites/sync";
 
 declare const vendetta: any;
 

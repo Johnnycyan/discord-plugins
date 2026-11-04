@@ -29,6 +29,6 @@ npm install
 npm run build   # or: npm run watch
 ```
 
-Each plugin lives in `plugins/<Name>/` with an `index.tsx` and a `manifest.json`. Code shared with the Equicord version lives in `../shared/<Name>/` and is imported from there; it must stay free of Equicord and Kettu imports. The build writes `dist/<Name>/manifest.json` and `dist/<Name>/index.js`, and GitHub Actions publishes `dist/` to GitHub Pages on every push to `main`.
+Each plugin lives in `plugins/<Name>/` with an `index.tsx` and a `manifest.json`. Code shared with the Equicord version lives in that plugin's folder, `../equicord-plugins/<Name>/`, and is imported from there; it must stay free of Equicord and Kettu imports. The build writes `dist/<Name>/manifest.json` and `dist/<Name>/index.js`, and GitHub Actions publishes `dist/` to GitHub Pages on every push to `main`.
 
 Kettu runs plugins through Hermes `eval`, where `let`/`const` inside loops are function scoped. Never close over a loop variable; use array methods instead.

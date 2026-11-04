@@ -8,7 +8,6 @@ My Discord client plugins for [Equicord](https://github.com/Equicord/Equicord) (
 |---|---|
 | `equicord-plugins/<Name>/` | Equicord user plugins. Only plugin folders go here: Equicord treats every top-level entry as a plugin. |
 | `kettu-plugins/` | Kettu plugins and their esbuild build. See [kettu-plugins/README.md](kettu-plugins/README.md). |
-| `shared/<Name>/` | Platform-free code used by both versions of a plugin (no `@api`, `@webpack` or Vendetta imports). |
 | `sync-server/` | Self-hosted sync server for CustomFavorites. See [sync-server/README.md](sync-server/README.md). |
 | `Equicord/` | Upstream Equicord clone used to build, not committed. |
 | `_old/` | Local archive, not committed. |
@@ -29,10 +28,10 @@ cd Equicord && pnpm install
 ## Building
 
 - **Equicord:** `cd Equicord && pnpm build` (or `pnpm watch`). Update upstream with `git pull` in `Equicord/`; the plugins are untouched.
-- **Kettu:** `cd kettu-plugins && npm install && npm run build`. Pushing to `main` deploys `kettu-plugins/dist` to GitHub Pages when `kettu-plugins/` or `shared/` changes.
+- **Kettu:** `cd kettu-plugins && npm install && npm run build`. Pushing to `main` deploys `kettu-plugins/dist` to GitHub Pages when `kettu-plugins/` or `equicord-plugins/` changes.
 
 ## Adding a plugin
 
 - **Equicord:** create `equicord-plugins/<Name>/index.ts(x)`.
 - **Kettu:** create `kettu-plugins/plugins/<Name>/index.tsx` and `manifest.json`.
-- **Both:** put the logic that does not touch the client in `shared/<Name>/` and import it relatively from each version.
+- **Both:** put the logic that does not touch the client in its own files in `equicord-plugins/<Name>/` (no `@api`, `@webpack` or Vendetta imports) and import it from the Kettu version with a relative path. It must live inside the plugin folder: the Equicord launcher copies only that folder when it builds.

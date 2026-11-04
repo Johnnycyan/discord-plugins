@@ -16,8 +16,8 @@ import { Channel, Guild } from "@vencord/discord-types";
 import { findCssClassesLazy, findStoreLazy } from "@webpack";
 import { Alerts, GuildStore, IconUtils, React, SelectedGuildStore, showToast, Tooltip, UserStore, useStateFromStores } from "@webpack/common";
 
-import { findRestoreIndex, PlacementHistory, updatePlacementHistory } from "../../shared/CustomFavorites/placement";
-import { createSync, SyncData, SyncMeta, SyncStatus } from "../../shared/CustomFavorites/sync";
+import { findRestoreIndex, PlacementHistory, updatePlacementHistory } from "./placement";
+import { createSync, SyncData, SyncMeta, SyncStatus } from "./sync";
 import managedStyle from "./style.css?managed";
 
 const logger = new Logger("CustomFavorites");
