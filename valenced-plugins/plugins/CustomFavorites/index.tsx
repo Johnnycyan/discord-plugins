@@ -88,6 +88,71 @@ function save(patch: Partial<Settings>) {
         .catch(e => logger.error("Failed to save settings", e));
 }
 
+// ---------- Diagnostics ----------
+
+/** What happened at start, for the "Copy diagnostics" report */
+const diagnostics = {
+    version: "",
+    missingModules: [] as string[],
+    patches: {} as Record<string, string>,
+    storeMethods: { patched: [] as string[], absent: [] as string[] },
+};
+
+/** Every function name on an object and its prototypes, Object.prototype excluded */
+function functionNames(obj: any) {
+    const names = new Set<string>();
+    let current = obj;
+    while (current && current !== Object.prototype) {
+        Object.getOwnPropertyNames(current).forEach(name => {
+            try {
+                if (name !== "constructor" && typeof current[name] === "function") names.add(name);
+            } catch { }
+        });
+        current = Object.getPrototypeOf(current);
+    }
+    return [...names].sort();
+}
+
+function buildDiagnostics() {
+    const tryRun = (fn: () => unknown) => {
+        try {
+            return fn();
+        } catch (e) {
+            return `threw: ${e instanceof Error ? e.message : String(e)}`;
+        }
+    };
+    const stored = settings().data?.favoriteChannels;
+    const meta = settings().syncMeta;
+    return {
+        plugin: diagnostics.version,
+        storage: { loaded: jsonStorage?.loaded ?? null, storedEntries: stored ? Object.keys(stored).length : null },
+        state: countEntries(getState()),
+        official: tryRun(() => countEntries(getOfficialState())),
+        // What Discord's UI sees: matches `state` when the store patches work
+        storeView: tryRun(() => ({
+            getFavoriteChannels: Object.keys(FavoriteStore.getFavoriteChannels() ?? {}).length,
+            getFavoritesCount: FavoriteStore.getFavoritesCount?.(),
+            hasStoredFavorites: FavoriteStore.hasStoredFavorites?.(),
+        })),
+        sync: {
+            configured: !!(settings().syncUrl && settings().syncToken),
+            status: syncStatus,
+            metaServerMatches: meta ? meta.server === (settings().syncUrl ?? "").trim() : null,
+            revision: meta?.revision ?? null,
+            baseEntries: meta ? Object.keys(meta.base?.state?.favoriteChannels ?? {}).length : null,
+        },
+        missingModules: diagnostics.missingModules,
+        patches: diagnostics.patches,
+        storeMethods: diagnostics.storeMethods,
+        favoriteStoreFunctions: tryRun(() => functionNames(FavoriteStore)),
+    };
+}
+
+function copyDiagnostics() {
+    Clipboard.setString(JSON.stringify(buildDiagnostics(), null, 2));
+    notify("Diagnostics copied", "A report of what the plugin found was copied to the clipboard.");
+}
+
 // ---------- Discord modules (looked up in start) ----------
 
 let logger: { log(...args: any[]): void; error(...args: any[]): void; } = console;
@@ -129,6 +194,7 @@ function lookupModules() {
         SettingsActions, FavoriteActions, FavoriteLimits, FavoriteConstants, MoveToSheet,
         ChannelListItems, BaseChannelItem, IconUtils,
     }).filter(([, mod]) => mod == null).map(([name]) => name);
+    diagnostics.missingModules = missing;
     if (missing.length) logger.error(`Modules not found: ${missing.join(", ")}`);
 }
 
@@ -611,6 +677,9 @@ function SettingsComponent() {
                         <TableRow label="Export to clipboard" subLabel="Copy your custom Favorites as JSON" onPress={exportToClipboard} arrow />
                         <TableRow label="Import from clipboard" subLabel="Replace your custom Favorites with copied JSON" onPress={() => importFromClipboard().then(forceUpdate)} arrow />
                     </TableRowGroup>
+                    <TableRowGroup title="Troubleshooting">
+                        <TableRow label="Copy diagnostics" subLabel="Copy a report of what the plugin found, for bug reports" onPress={copyDiagnostics} arrow />
+                    </TableRowGroup>
                 </Stack>
             </Page>
         </ScrollView>
@@ -637,8 +706,13 @@ function patchFavoriteStore(cleanup: PluginCleanupApi) {
         autoAddJoinedThreads: () => !!getState().autoAddJoinedThreads,
     };
 
+    diagnostics.storeMethods = { patched: [], absent: [] };
     Object.keys(fixed).forEach(name => {
-        if (typeof FavoriteStore[name] !== "function") return;
+        if (typeof FavoriteStore[name] !== "function") {
+            diagnostics.storeMethods.absent.push(name);
+            return;
+        }
+        diagnostics.storeMethods.patched.push(name);
         // The original comes unbound: keep the store as its `this`
         cleanup(instead(FavoriteStore, name, function (this: any, args: any[], orig: any) {
             return fixed[name](args, (...rest: any[]) => orig.apply(this, rest));
@@ -803,8 +877,12 @@ export default plugin<{ jsonStorage: Settings; }>({
         default: DefaultSettings,
     },
 
-    async start({ cleanup, jsonStorage: storage, logger: pluginLogger }) {
+    async start({ cleanup, jsonStorage: storage, logger: pluginLogger, plugin: self }) {
         if (pluginLogger) logger = pluginLogger;
+        const manifestVersion: any = self?.manifest?.version;
+        diagnostics.version = typeof manifestVersion === "string" ? manifestVersion
+            : Array.isArray(manifestVersion?.nums) ? manifestVersion.nums.join(".") + (manifestVersion.label ? `-${manifestVersion.label}` : "") : "unknown";
+        diagnostics.patches = {};
         jsonStorage = storage;
         // load: true starts reading without waiting; the favorites must be in memory before Discord asks for them
         if (!storage.loaded) await storage.get();
@@ -821,7 +899,9 @@ export default plugin<{ jsonStorage: Settings; }>({
         steps.forEach(([name, apply]) => {
             try {
                 apply(cleanup);
+                diagnostics.patches[name] = "ok";
             } catch (e) {
+                diagnostics.patches[name] = e instanceof Error ? e.message : String(e);
                 logger.error(`Failed to apply ${name} patches`, e);
             }
         });
