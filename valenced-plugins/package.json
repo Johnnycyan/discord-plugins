@@ -1,0 +1,38 @@
+{
+	"name": "valenced-plugins",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"build": "valenced-plugin build",
+		"build:dev": "valenced-plugin build --dev",
+		"package": "node package.mjs",
+		"serve": "valenced-plugin serve",
+		"lint:types": "tsc -b plugins/*/tsconfig.json"
+	},
+	"dependencies": {
+		"@valenced/plugin-cli": "git+https://github.com/Valenced/valenced-plugin-cli.git",
+		"@valenced/types": "git+https://github.com/Valenced/valenced-types.git",
+		"fflate": "^0.8.3"
+	},
+	"devDependencies": {
+		"@types/react": "^19.2.18",
+		"react-native": "0.81.6",
+		"typescript": "^7.0.2"
+	},
+	"overrides": {
+		"@react-native/community-cli-plugin": "npm:dry-uninstall",
+		"@react-native/codegen": "npm:dry-uninstall",
+		"babel-jest": "npm:dry-uninstall",
+		"babel-plugin-syntax-hermes-parser": "npm:dry-uninstall",
+		"hermes-compiler": "npm:dry-uninstall",
+		"jsc-android": "npm:dry-uninstall",
+		"react-devtools-core": "npm:dry-uninstall",
+		"recyclerlistview": "npm:dry-uninstall",
+		"react-native-gesture-handler": "npm:dry-uninstall",
+		"react-native-screens": "npm:dry-uninstall"
+	},
+	"trustedDependencies": [
+		"@valenced/plugin-cli",
+		"@swc/core"
+	]
+}

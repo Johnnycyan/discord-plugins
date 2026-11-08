@@ -1,0 +1,20 @@
+{
+	"format": 1,
+	"id": "johnnycyan.custom-favorites",
+	"name": "CustomFavorites",
+	"description": "Replaces Discord's Favorites with a local, unlimited version, with server icons and import from the official Favorites",
+	"author": "Johnnycyan <258020906805362688> (https://github.com/Johnnycyan/discord-plugins \"GitHub\")",
+	"icon": "StarIcon",
+	"version": "1.0.0",
+	"dependencies": {
+		"valenced.api": {
+			"version": ">=1 <2"
+		},
+		"discord": {
+			"version": "*"
+		}
+	},
+	"dist": {
+		"script": "index.js"
+	}
+}

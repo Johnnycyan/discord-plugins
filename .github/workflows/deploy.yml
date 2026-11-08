@@ -6,6 +6,7 @@ on:
     paths:
       - "kettu-plugins/**"
       - "equicord-plugins/**"
+      - "valenced-plugins/**"
       - ".github/workflows/deploy.yml"
   workflow_dispatch:
 
@@ -33,6 +34,23 @@ jobs:
           cache-dependency-path: kettu-plugins/package-lock.json
       - run: npm ci
       - run: npm run build
+
+      # Valenced plugins: published as a plugin repository under /valenced/index.json
+      - uses: oven-sh/setup-bun@v2
+      - name: Stub the Equicord tsconfig
+        # The shared code's nearest tsconfig extends Equicord's, which isn't cloned here
+        working-directory: .
+        run: test -f Equicord/tsconfig.json || { mkdir -p Equicord && echo '{}' > Equicord/tsconfig.json; }
+      - name: Build Valenced plugins
+        working-directory: valenced-plugins
+        run: |
+          bun install
+          bun run build
+          node package.mjs
+      - name: Add the Valenced repository to the site
+        working-directory: .
+        run: cp -r valenced-plugins/dist kettu-plugins/dist/valenced
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: kettu-plugins/dist
