@@ -103,7 +103,31 @@ const diagnostics = {
     storeMethods: { patched: [] as string[], absent: [] as string[] },
     /** Last category collapse actions seen */
     collapseActions: [] as { type: string; keys: string[]; }[],
+    /** Recent calls into Discord's favorites actions, settings writes, and errors */
+    events: [] as string[],
 };
+
+/** Short, JSON-safe summary of a value for the event log */
+function summarize(value: unknown, depth = 0): unknown {
+    if (value == null || typeof value !== "object") return typeof value === "function" ? "fn" : value;
+    if (depth >= 2) return Array.isArray(value) ? `[${value.length}]` : "{...}";
+    if (Array.isArray(value)) return value.slice(0, 4).map(v => summarize(v, depth + 1));
+    const out: Record<string, unknown> = {};
+    Object.keys(value).slice(0, 8).forEach(key => {
+        try {
+            out[key] = summarize((value as any)[key], depth + 1);
+        } catch { }
+    });
+    return out;
+}
+
+function recordEvent(label: string, detail?: unknown) {
+    let text = label;
+    try {
+        if (detail !== undefined) text += ` ${JSON.stringify(summarize(detail))}`;
+    } catch { }
+    diagnostics.events = [`${new Date().toLocaleTimeString()} ${text.slice(0, 400)}`, ...diagnostics.events].slice(0, 25);
+}
 
 /** Every function name on an object and its prototypes, Object.prototype excluded */
 function functionNames(obj: any) {
@@ -208,7 +232,15 @@ function buildDiagnostics() {
         favoriteModules: tryRun(findFavoriteModules),
         patches: diagnostics.patches,
         storeMethods: diagnostics.storeMethods,
+        // The category list Discord's "Move to..." sheet offers
+        favoritesCategories: tryRun(() => {
+            const fn = FavoriteHelpers?.getFavoritesCategories;
+            if (typeof fn !== "function") return "not loaded";
+            const result = fn();
+            return { arity: fn.length, count: result == null ? null : Object.keys(result).length, sample: summarize(Array.isArray(result) ? result.slice(0, 2) : result) };
+        }),
         collapseActions: diagnostics.collapseActions,
+        events: diagnostics.events,
         favoriteStoreFunctions: tryRun(() => functionNames(FavoriteStore)),
     };
 }
@@ -229,6 +261,8 @@ let GuildStore: any;
 let ChannelStore: any;
 
 let IconUtils: any;
+/** Discord's favorites helpers module (getFavoritesLimits, getFavoritesCategories, ...) */
+let FavoriteHelpers: any;
 
 function lookupStores() {
     FavoriteStore = Stores.FavoriteStore;
@@ -814,6 +848,7 @@ function patchCategoryCollapseStore(cleanup: PluginCleanupApi) {
     cleanup(before(Dispatcher, "dispatch", (args: any[]) => {
         const action = args[0];
         const type: unknown = action?.type;
+        if (typeof type === "string" && /FAVORITE/.test(type)) recordEvent(`dispatch ${type}`, action);
         if (typeof type !== "string" || !type.startsWith("CATEGORY_")) return args;
         try {
             handleCollapseAction(action);
@@ -869,6 +904,7 @@ function patchWrites(cleanup: PluginCleanupApi) {
     // Every favorites action writes through updateAsync("favorites", updater): keep it local instead
     whenLoaded(cleanup, "SettingsActions", withProps("PreloadedUserSettingsActionCreators"), mod => {
         cleanup(instead(mod.PreloadedUserSettingsActionCreators, "updateAsync", function (this: any, args: any[], orig: any) {
+            recordEvent(`updateAsync(${String(args[0])})`);
             if (args[0] !== "favorites") return orig.apply(this, args);
             try {
                 updateFavorites(args[1]);
@@ -888,6 +924,13 @@ function patchWrites(cleanup: PluginCleanupApi) {
     }, { returnNamespace: true });
 
     whenLoaded(cleanup, "FavoriteActions", withProps("updateFavoriteChannels", "addFavoriteChannels"), mod => {
+        Object.keys(mod).forEach(name => {
+            if (typeof mod[name] !== "function") return;
+            cleanup(before(mod, name, (args: any[]) => {
+                recordEvent(`FavoriteActions.${name}`, args);
+                return args;
+            }));
+        });
         cleanup(before(mod, "updateFavoriteChannels", (args: any[]) => {
             const fromMoveSheet = Date.now() - moveSheetOpenedAt < MOVE_SHEET_WINDOW_MS;
             moveSheetOpenedAt = 0;
@@ -904,6 +947,7 @@ function patchWrites(cleanup: PluginCleanupApi) {
 
 function patchLimits(cleanup: PluginCleanupApi) {
     whenLoaded(cleanup, "FavoriteLimits", withProps("getFavoritesLimits", "useFavoritesLimitUpsell"), mod => {
+        FavoriteHelpers = mod;
         cleanup(instead(mod, "getFavoritesLimits", () => ({
             favoriteLimit: Number.MAX_SAFE_INTEGER,
             canUpsellFavoriteLimit: false,
@@ -994,7 +1038,18 @@ function updateFavorites(updater: (draft: FavoritesState) => boolean | void) {
     const before = getState();
     const draft = clone(before);
     draft.favoriteChannels ??= {};
-    if (updater(draft) === false) return;
+    try {
+        if (updater(draft) === false) {
+            recordEvent("updater returned false");
+            return;
+        }
+    } catch (e) {
+        recordEvent(`updater threw: ${e instanceof Error ? `${e.message} ${String(e.stack ?? "").split("\n").slice(0, 3).join(" | ")}` : String(e)}`);
+        throw e;
+    }
+    const changed = Object.keys({ ...before.favoriteChannels, ...draft.favoriteChannels })
+        .filter(id => JSON.stringify(before.favoriteChannels[id]) !== JSON.stringify(draft.favoriteChannels[id]));
+    recordEvent(`updater changed ${changed.length}`, changed.slice(0, 3).map(id => ({ id, before: before.favoriteChannels[id], after: draft.favoriteChannels[id] })));
 
     try {
         const history = updatePlacementHistory(
@@ -1021,7 +1076,14 @@ export default plugin<{ jsonStorage: Settings; }>({
     },
 
     async start({ cleanup, jsonStorage: storage, logger: pluginLogger, plugin: self }) {
-        if (pluginLogger) logger = pluginLogger;
+        const baseLogger = pluginLogger ?? console;
+        logger = {
+            log: (...args: any[]) => baseLogger.log(...args),
+            error: (...args: any[]) => {
+                recordEvent(`error: ${args.map(a => a instanceof Error ? a.message : String(a)).join(" ")}`);
+                baseLogger.error(...args);
+            },
+        };
         const manifestVersion: any = self?.manifest?.version;
         diagnostics.version = typeof manifestVersion === "string" ? manifestVersion
             : Array.isArray(manifestVersion?.nums) ? manifestVersion.nums.join(".") + (manifestVersion.label ? `-${manifestVersion.label}` : "") : "unknown";
