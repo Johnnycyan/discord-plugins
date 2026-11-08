@@ -11,8 +11,8 @@ import { AlertActionCreators } from "@valenced/discord/actions";
 import { Design } from "@valenced/discord/design";
 import { Stores } from "@valenced/discord/flux";
 import { Clipboard } from "@valenced/externals/react-native-clipboard";
-import { lookupModule } from "@valenced/modules/finders";
-import { withName, withProps } from "@valenced/modules/finders/filters";
+import { getModules, lookupModules as findModules } from "@valenced/modules/finders";
+import { createFilterGenerator, FilterScopes, withName, withProps } from "@valenced/modules/finders/filters";
 import { after, before, instead } from "@valenced/patcher";
 import { findInReactFiber } from "@valenced/utils/react";
 import { createContext, useContext, useEffect, useReducer, useState } from "react";
@@ -93,7 +93,11 @@ function save(patch: Partial<Settings>) {
 /** What happened at start, for the "Copy diagnostics" report */
 const diagnostics = {
     version: "",
-    missingModules: [] as string[],
+    missingStores: [] as string[],
+    /** Lazily patched modules: waiting, patched or failed */
+    modules: {} as Record<string, string>,
+    /** What Discord's own FavoriteStore returned before it was patched */
+    originalStore: null as unknown,
     patches: {} as Record<string, string>,
     storeMethods: { patched: [] as string[], absent: [] as string[] },
 };
@@ -111,6 +115,33 @@ function functionNames(obj: any) {
         current = Object.getPrototypeOf(current);
     }
     return [...names].sort();
+}
+
+/** Loaded modules with an export named like "favorite", to spot renamed Discord APIs */
+const withFavoriteExport = createFilterGenerator<[]>(
+    (_, __, exports) => {
+        if (exports == null || (typeof exports !== "object" && typeof exports !== "function")) return false;
+        return [exports, exports.default].some(target => target != null && (typeof target === "object" || typeof target === "function")
+            && Object.keys(target).some(key => /favorit/i.test(key)));
+    },
+    () => "johnnycyan.custom-favorites.favoriteExport",
+    FilterScopes.Initialized,
+);
+
+function findFavoriteModules() {
+    const found: { id: number; keys: string[]; }[] = [];
+    for (const [exports, id] of findModules(withFavoriteExport(), { returnNamespace: true } as any) as any) {
+        const keys = new Set<string>();
+        try {
+            [exports, exports?.default].forEach((target: any) => {
+                if (target == null || (typeof target !== "object" && typeof target !== "function")) return;
+                Object.keys(target).forEach(key => keys.add(key));
+            });
+        } catch { }
+        found.push({ id, keys: [...keys].slice(0, 25) });
+        if (found.length >= 40) break;
+    }
+    return found;
 }
 
 function buildDiagnostics() {
@@ -141,7 +172,17 @@ function buildDiagnostics() {
             revision: meta?.revision ?? null,
             baseEntries: meta ? Object.keys(meta.base?.state?.favoriteChannels ?? {}).length : null,
         },
-        missingModules: diagnostics.missingModules,
+        missingStores: diagnostics.missingStores,
+        modules: diagnostics.modules,
+        originalStore: diagnostics.originalStore,
+        sampleEntries: tryRun(() => Object.values(FavoriteStore.getFavoriteChannels() ?? {}).slice(0, 2)),
+        categoryRecord: tryRun(() => {
+            const id = Object.keys(getState().favoriteChannels).find(key => getState().favoriteChannels[key].type === ENTRY_TYPE_CATEGORY);
+            const record = id ? FavoriteStore.getCategoryRecord(id) : undefined;
+            return record == null ? record ?? null : { constructor: record.constructor?.name, keys: Object.keys(record).slice(0, 20), hasMerge: typeof record.merge === "function" };
+        }),
+        favoriteStores: tryRun(() => Object.keys(Stores).filter(name => /favorit/i.test(name))),
+        favoriteModules: tryRun(findFavoriteModules),
         patches: diagnostics.patches,
         storeMethods: diagnostics.storeMethods,
         favoriteStoreFunctions: tryRun(() => functionNames(FavoriteStore)),
@@ -163,39 +204,36 @@ let UserSettingsProtoStore: any;
 let GuildStore: any;
 let ChannelStore: any;
 
-let SettingsActions: any;
-let FavoriteActions: any;
-let FavoriteLimits: any;
-let FavoriteConstants: any;
-let MoveToSheet: any;
-let ChannelListItems: any;
-let BaseChannelItem: any;
 let IconUtils: any;
 
-function lookupModules() {
+function lookupStores() {
     FavoriteStore = Stores.FavoriteStore;
     CategoryCollapseStore = Stores.CategoryCollapseStore;
     UserSettingsProtoStore = Stores.UserSettingsProtoStore;
     GuildStore = Stores.GuildStore;
     ChannelStore = Stores.ChannelStore;
 
-    SettingsActions = (lookupModule(withProps("PreloadedUserSettingsActionCreators"))[0] as any)?.PreloadedUserSettingsActionCreators;
-    FavoriteActions = lookupModule(withProps("updateFavoriteChannels", "addFavoriteChannels"))[0];
-    FavoriteLimits = lookupModule(withProps("getFavoritesLimits", "useFavoritesLimitUpsell"))[0];
-    FavoriteConstants = lookupModule(withProps("MAX_FAVORITE_CHANNELS", "FAVORITES_RAW_GUILD_ID"))[0];
-    // The module, not the function, so its default export can be patched
-    MoveToSheet = lookupModule(withName("openFavoritesGuildMoveToCategoryActionSheet"), { returnNamespace: true })[0];
-    ChannelListItems = lookupModule(withProps("renderChannelListItem"))[0];
-    BaseChannelItem = lookupModule(withProps("BaseChannelIcon", "default"))[0];
-    IconUtils = lookupModule(withProps("getGuildIconURL"))[0];
+    const missing = Object.entries({ FavoriteStore, CategoryCollapseStore, UserSettingsProtoStore, GuildStore, ChannelStore })
+        .filter(([, store]) => store == null).map(([name]) => name);
+    diagnostics.missingStores = missing;
+    if (missing.length) logger.error(`Stores not found: ${missing.join(", ")}`);
+}
 
-    const missing = Object.entries({
-        FavoriteStore, CategoryCollapseStore, UserSettingsProtoStore, GuildStore, ChannelStore,
-        SettingsActions, FavoriteActions, FavoriteLimits, FavoriteConstants, MoveToSheet,
-        ChannelListItems, BaseChannelItem, IconUtils,
-    }).filter(([, mod]) => mod == null).map(([name]) => name);
-    diagnostics.missingModules = missing;
-    if (missing.length) logger.error(`Modules not found: ${missing.join(", ")}`);
+/**
+ * Runs `apply` on a module now if Discord already loaded it, or as soon as it does.
+ * Valenced only searches loaded modules, and Discord loads most of these lazily.
+ */
+function whenLoaded(cleanup: PluginCleanupApi, name: string, filter: any, apply: (mod: any) => void, options: object = {}) {
+    diagnostics.modules[name] = "waiting";
+    cleanup(getModules(filter, (mod: any) => {
+        try {
+            apply(mod);
+            diagnostics.modules[name] = "patched";
+        } catch (e) {
+            diagnostics.modules[name] = `failed: ${e instanceof Error ? e.message : String(e)}`;
+            logger.error(`Failed to patch ${name}`, e);
+        }
+    }, { max: 1, ...options } as any));
 }
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
@@ -580,7 +618,7 @@ function GuildIcon({ guildId, size }: { guildId: string; size: number; }) {
     // Same gap the channel type icons leave before the next item
     const style = { width: size, height: size, borderRadius: size / 2, marginRight: ICON_GAP };
     if (guild.icon) {
-        const uri = IconUtils.getGuildIconURL({ id: guild.id, icon: guild.icon, canAnimate: false, size: 64 });
+        const uri = IconUtils?.getGuildIconURL({ id: guild.id, icon: guild.icon, canAnimate: false, size: 64 });
         if (uri) return <Image source={{ uri }} style={style} accessibilityLabel={guild.name} />;
     }
 
@@ -688,7 +726,6 @@ function SettingsComponent() {
 
 // ---------- Patches ----------
 
-let originalMaxFavorites: number | undefined;
 
 function patchFavoriteStore(cleanup: PluginCleanupApi) {
     const fixed: Record<string, (args: any[], orig: (...args: any[]) => any) => any> = {
@@ -739,44 +776,53 @@ function patchCategoryCollapseStore(cleanup: PluginCleanupApi) {
 
 function patchWrites(cleanup: PluginCleanupApi) {
     // Every favorites action writes through updateAsync("favorites", updater): keep it local instead
-    cleanup(instead(SettingsActions, "updateAsync", function (this: any, args: any[], orig: any) {
-        if (args[0] !== "favorites") return orig.apply(this, args);
-        try {
-            updateFavorites(args[1]);
-        } catch (e) {
-            logger.error("Failed to update favorites", e);
-        }
-        return Promise.resolve();
-    }));
+    whenLoaded(cleanup, "SettingsActions", withProps("PreloadedUserSettingsActionCreators"), mod => {
+        cleanup(instead(mod.PreloadedUserSettingsActionCreators, "updateAsync", function (this: any, args: any[], orig: any) {
+            if (args[0] !== "favorites") return orig.apply(this, args);
+            try {
+                updateFavorites(args[1]);
+            } catch (e) {
+                logger.error("Failed to update favorites", e);
+            }
+            return Promise.resolve();
+        }));
+    });
 
-    cleanup(before(MoveToSheet, "default", (args: any[]) => {
-        moveSheetOpenedAt = Date.now();
-        return args;
-    }));
+    // The module, not the function, so its default export can be patched
+    whenLoaded(cleanup, "MoveToSheet", withName("openFavoritesGuildMoveToCategoryActionSheet"), mod => {
+        cleanup(before(mod, "default", (args: any[]) => {
+            moveSheetOpenedAt = Date.now();
+            return args;
+        }));
+    }, { returnNamespace: true });
 
-    cleanup(before(FavoriteActions, "updateFavoriteChannels", (args: any[]) => {
-        const fromMoveSheet = Date.now() - moveSheetOpenedAt < MOVE_SHEET_WINDOW_MS;
-        moveSheetOpenedAt = 0;
-        if (!fromMoveSheet) return args;
-        try {
-            restorePlacement(args[0]);
-        } catch (e) {
-            logger.error("Failed to restore channel placement", e);
-        }
-        return args;
-    }));
+    whenLoaded(cleanup, "FavoriteActions", withProps("updateFavoriteChannels", "addFavoriteChannels"), mod => {
+        cleanup(before(mod, "updateFavoriteChannels", (args: any[]) => {
+            const fromMoveSheet = Date.now() - moveSheetOpenedAt < MOVE_SHEET_WINDOW_MS;
+            moveSheetOpenedAt = 0;
+            if (!fromMoveSheet) return args;
+            try {
+                restorePlacement(args[0]);
+            } catch (e) {
+                logger.error("Failed to restore channel placement", e);
+            }
+            return args;
+        }));
+    });
 }
 
 function patchLimits(cleanup: PluginCleanupApi) {
-    cleanup(instead(FavoriteLimits, "getFavoritesLimits", () => ({
-        favoriteLimit: Number.MAX_SAFE_INTEGER,
-        canUpsellFavoriteLimit: false,
-    })));
+    whenLoaded(cleanup, "FavoriteLimits", withProps("getFavoritesLimits", "useFavoritesLimitUpsell"), mod => {
+        cleanup(instead(mod, "getFavoritesLimits", () => ({
+            favoriteLimit: Number.MAX_SAFE_INTEGER,
+            canUpsellFavoriteLimit: false,
+        })));
+    });
 
-    originalMaxFavorites = FavoriteConstants.MAX_FAVORITE_CHANNELS;
-    FavoriteConstants.MAX_FAVORITE_CHANNELS = Number.MAX_SAFE_INTEGER;
-    cleanup(() => {
-        if (originalMaxFavorites != null) FavoriteConstants.MAX_FAVORITE_CHANNELS = originalMaxFavorites;
+    whenLoaded(cleanup, "FavoriteConstants", withProps("MAX_FAVORITE_CHANNELS", "FAVORITES_RAW_GUILD_ID"), mod => {
+        const original = mod.MAX_FAVORITE_CHANNELS;
+        mod.MAX_FAVORITE_CHANNELS = Number.MAX_SAFE_INTEGER;
+        cleanup(() => { mod.MAX_FAVORITE_CHANNELS = original; });
     });
 }
 
@@ -812,38 +858,44 @@ function patchRowType(cleanup: PluginCleanupApi, type: any) {
 }
 
 function patchGuildIcons(cleanup: PluginCleanupApi) {
-    cleanup(instead(ChannelListItems, "renderChannelListItem", function (this: any, args: any[], orig: any) {
-        const ret = orig.apply(this, args);
-        if (args[0]?.guild?.id !== FAVORITES_GUILD_ID || ret == null) return ret;
+    whenLoaded(cleanup, "IconUtils", withProps("getGuildIconURL"), mod => { IconUtils = mod; });
 
-        // Text channels with threads come as a fragment of [channel row, thread rows...]
-        const rows = Array.isArray(ret.props?.children) ? ret.props.children : [ret];
-        rows.forEach((row: any) => {
-            if (row?.props?.channel?.guild_id) patchRowType(cleanup, row.type);
-        });
+    whenLoaded(cleanup, "ChannelListItems", withProps("renderChannelListItem"), mod => {
+        cleanup(instead(mod, "renderChannelListItem", function (this: any, args: any[], orig: any) {
+            const ret = orig.apply(this, args);
+            if (args[0]?.guild?.id !== FAVORITES_GUILD_ID || ret == null) return ret;
 
-        return <FavoritesRowContext.Provider key={ret.key} value={true}>{ret}</FavoritesRowContext.Provider>;
-    }));
+            // Text channels with threads come as a fragment of [channel row, thread rows...]
+            const rows = Array.isArray(ret.props?.children) ? ret.props.children : [ret];
+            rows.forEach((row: any) => {
+                if (row?.props?.channel?.guild_id) patchRowType(cleanup, row.type);
+            });
+
+            return <FavoritesRowContext.Provider key={ret.key} value={true}>{ret}</FavoritesRowContext.Provider>;
+        }));
+    });
 
     // Voice rows render through BaseChannelItem, which takes the type icon as a prop
-    cleanup(before(BaseChannelItem, "default", (args: any[]) => {
-        // Hook called on every render, before any early return, to keep hook order stable
-        const inFavorites = useContext(FavoritesRowContext);
-        const props = args[0];
-        const channel = props?.icon?.props?.channel;
-        if (!shouldShowGuildIcon(inFavorites, channel) || props.hideIcon) return args;
+    whenLoaded(cleanup, "BaseChannelItem", withProps("BaseChannelIcon", "default"), mod => {
+        cleanup(before(mod, "default", (args: any[]) => {
+            // Hook called on every render, before any early return, to keep hook order stable
+            const inFavorites = useContext(FavoritesRowContext);
+            const props = args[0];
+            const channel = props?.icon?.props?.channel;
+            if (!shouldShowGuildIcon(inFavorites, channel) || props.hideIcon) return args;
 
-        args[0] = {
-            ...props,
-            icon: (
-                <View style={{ flexDirection: "row", alignItems: "center" }}>
-                    <GuildIcon guildId={channel.guild_id} size={ICON_SIZE} />
-                    {props.icon}
-                </View>
-            ),
-        };
-        return args;
-    }));
+            args[0] = {
+                ...props,
+                icon: (
+                    <View style={{ flexDirection: "row", alignItems: "center" }}>
+                        <GuildIcon guildId={channel.guild_id} size={ICON_SIZE} />
+                        {props.icon}
+                    </View>
+                ),
+            };
+            return args;
+        }));
+    });
     cleanup(() => patchedRowTypes.clear());
 }
 
@@ -887,7 +939,16 @@ export default plugin<{ jsonStorage: Settings; }>({
         // load: true starts reading without waiting; the favorites must be in memory before Discord asks for them
         if (!storage.loaded) await storage.get();
 
-        lookupModules();
+        diagnostics.modules = {};
+        lookupStores();
+        diagnostics.originalStore = (() => {
+            try {
+                const entries = Object.values(FavoriteStore.getFavoriteChannels() ?? {});
+                return { count: entries.length, sample: entries.slice(0, 2) };
+            } catch (e) {
+                return `threw: ${e instanceof Error ? e.message : String(e)}`;
+            }
+        })();
 
         const steps: [string, (cleanup: PluginCleanupApi) => void][] = [
             ["store", patchFavoriteStore],
