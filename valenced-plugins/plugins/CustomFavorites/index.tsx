@@ -179,7 +179,27 @@ function buildDiagnostics() {
         categoryRecord: tryRun(() => {
             const id = Object.keys(getState().favoriteChannels).find(key => getState().favoriteChannels[key].type === ENTRY_TYPE_CATEGORY);
             const record = id ? FavoriteStore.getCategoryRecord(id) : undefined;
-            return record == null ? record ?? null : { constructor: record.constructor?.name, keys: Object.keys(record).slice(0, 20), hasMerge: typeof record.merge === "function" };
+            return {
+                templateSource: categoryTemplateSource,
+                record: record == null ? null : { constructor: record.constructor?.name, id: record.id, name: record.name, type: record.type, guild_id: record.guild_id, keys: Object.keys(record).slice(0, 30) },
+            };
+        }),
+        // Discord's own store as it is now, through the unpatched prototype methods
+        originalStoreNow: tryRun(() => {
+            const proto = Object.getPrototypeOf(FavoriteStore);
+            const entries: any[] = Object.values(proto.getFavoriteChannels.call(FavoriteStore) ?? {});
+            const category = entries.find(e => e?.type === ENTRY_TYPE_CATEGORY);
+            const record = category ? proto.getCategoryRecord.call(FavoriteStore, category.id) : undefined;
+            return {
+                count: entries.length,
+                sample: entries.slice(0, 2),
+                categoryRecord: record == null ? null : { constructor: record.constructor?.name, id: record.id, name: record.name, type: record.type, guild_id: record.guild_id, parent_id: record.parent_id, keys: Object.keys(record).slice(0, 30) },
+            };
+        }),
+        sampleChannel: tryRun(() => {
+            const id = Object.keys(getState().favoriteChannels).find(key => getState().favoriteChannels[key].type !== ENTRY_TYPE_CATEGORY);
+            const channel = id ? ChannelStore.getChannel(id) : undefined;
+            return channel == null ? null : { constructor: channel.constructor?.name, type: channel.type, guild_id: channel.guild_id, hasMerge: typeof channel.merge === "function" };
         }),
         favoriteStores: tryRun(() => Object.keys(Stores).filter(name => /favorit/i.test(name))),
         favoriteModules: tryRun(findFavoriteModules),
@@ -531,20 +551,42 @@ function getCategoryRecord(id: string, original: (id: string) => any) {
     const entry = getState().favoriteChannels[id];
     let record: any;
     if (entry?.type === ENTRY_TYPE_CATEGORY) {
-        const base = original(id) ?? categoryTemplate ?? findCategoryTemplate(original);
+        const base = original(id) ?? categoryTemplate ?? findCategoryTemplate(original) ?? buildCategoryTemplate();
         if (base) {
             categoryTemplate ??= base;
             record = base.merge({ id, name: entry.nickname, position: entry.position });
         }
     }
-    categoryRecords.records[id] = record;
+    // Not cached when missing: the channels it is built from may load later
+    if (record) categoryRecords.records[id] = record;
     return record;
 }
+
+/** Where the category template came from, for diagnostics */
+let categoryTemplateSource = "none";
 
 function findCategoryTemplate(original: (id: string) => any) {
     const official = UserSettingsProtoStore.settings?.favorites?.favoriteChannels ?? {};
     const id = Object.keys(official).find(key => official[key]?.type === ENTRY_TYPE_CATEGORY);
-    return id ? original(id) : null;
+    const record = id ? original(id) : null;
+    if (record) categoryTemplateSource = "official category";
+    return record;
+}
+
+/** Discord's channel type for categories */
+const GUILD_CATEGORY = 4;
+
+/**
+ * Discord only has category records for the official Favorites, and on newer versions not until its store
+ * loads them. Build one from any favorited channel instead: same record class, turned into a category.
+ */
+function buildCategoryTemplate() {
+    const ids = Object.keys(getState().favoriteChannels);
+    const channel = ids.map(channelId => getState().favoriteChannels[channelId].type === ENTRY_TYPE_CATEGORY ? null : ChannelStore.getChannel(channelId))
+        .find(record => typeof record?.merge === "function");
+    if (!channel) return null;
+    categoryTemplateSource = "built from a channel";
+    return channel.merge({ type: GUILD_CATEGORY, guild_id: FAVORITES_GUILD_ID, parent_id: null, nsfw: false, topic: null });
 }
 
 function isFavorite(id: string | null | undefined) {
@@ -941,6 +983,12 @@ export default plugin<{ jsonStorage: Settings; }>({
 
         diagnostics.modules = {};
         lookupStores();
+        // Newer Discord fills its favorites store lazily; its category records serve as templates
+        try {
+            FavoriteStore.initializeIfNeeded?.();
+        } catch (e) {
+            logger.error("Failed to initialize FavoriteStore", e);
+        }
         diagnostics.originalStore = (() => {
             try {
                 const entries = Object.values(FavoriteStore.getFavoriteChannels() ?? {});
