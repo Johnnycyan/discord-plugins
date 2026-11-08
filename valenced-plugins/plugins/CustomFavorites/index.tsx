@@ -1035,8 +1035,8 @@ function patchGuildIcons(cleanup: PluginCleanupApi) {
 }
 
 function updateFavorites(updater: (draft: FavoritesState) => boolean | void) {
-    const before = getState();
-    const draft = clone(before);
+    const previous = getState();
+    const draft = clone(previous);
     draft.favoriteChannels ??= {};
     try {
         if (updater(draft) === false) {
@@ -1047,14 +1047,14 @@ function updateFavorites(updater: (draft: FavoritesState) => boolean | void) {
         recordEvent(`updater threw: ${e instanceof Error ? `${e.message} ${String(e.stack ?? "").split("\n").slice(0, 3).join(" | ")}` : String(e)}`);
         throw e;
     }
-    const changed = Object.keys({ ...before.favoriteChannels, ...draft.favoriteChannels })
-        .filter(id => JSON.stringify(before.favoriteChannels[id]) !== JSON.stringify(draft.favoriteChannels[id]));
-    recordEvent(`updater changed ${changed.length}`, changed.slice(0, 3).map(id => ({ id, before: before.favoriteChannels[id], after: draft.favoriteChannels[id] })));
+    const changed = Object.keys({ ...previous.favoriteChannels, ...draft.favoriteChannels })
+        .filter(id => JSON.stringify(previous.favoriteChannels[id]) !== JSON.stringify(draft.favoriteChannels[id]));
+    recordEvent(`updater changed ${changed.length}`, changed.slice(0, 3).map(id => ({ id, previous: previous.favoriteChannels[id], next: draft.favoriteChannels[id] })));
 
     try {
         const history = updatePlacementHistory(
             clone(settings().placementHistory ?? {}),
-            before.favoriteChannels,
+            previous.favoriteChannels,
             draft.favoriteChannels,
             ENTRY_TYPE_CATEGORY,
             NO_PARENT
