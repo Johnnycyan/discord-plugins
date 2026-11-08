@@ -9,6 +9,7 @@ import { createSync, SyncData, SyncMeta, SyncStatus } from "../../../equicord-pl
 import Page from "@valenced/components/Page";
 import { AlertActionCreators } from "@valenced/discord/actions";
 import { Design } from "@valenced/discord/design";
+import { Dispatcher } from "@valenced/discord/common/flux";
 import { Stores } from "@valenced/discord/flux";
 import { Clipboard } from "@valenced/externals/react-native-clipboard";
 import { getModules, lookupModules as findModules } from "@valenced/modules/finders";
@@ -100,6 +101,8 @@ const diagnostics = {
     originalStore: null as unknown,
     patches: {} as Record<string, string>,
     storeMethods: { patched: [] as string[], absent: [] as string[] },
+    /** Last category collapse actions seen */
+    collapseActions: [] as { type: string; keys: string[]; }[],
 };
 
 /** Every function name on an object and its prototypes, Object.prototype excluded */
@@ -205,6 +208,7 @@ function buildDiagnostics() {
         favoriteModules: tryRun(findFavoriteModules),
         patches: diagnostics.patches,
         storeMethods: diagnostics.storeMethods,
+        collapseActions: diagnostics.collapseActions,
         favoriteStoreFunctions: tryRun(() => functionNames(FavoriteStore)),
     };
 }
@@ -805,6 +809,20 @@ function patchCategoryCollapseStore(cleanup: PluginCleanupApi) {
         return entry?.type === ENTRY_TYPE_CATEGORY ? !!entry.collapsed : orig.apply(this, args);
     }));
 
+    // Newer Discord collapses Favorites categories like server categories, through these actions,
+    // instead of through the favorites settings. Keep the state in the custom favorites so it syncs.
+    cleanup(before(Dispatcher, "dispatch", (args: any[]) => {
+        const action = args[0];
+        const type: unknown = action?.type;
+        if (typeof type !== "string" || !type.startsWith("CATEGORY_")) return args;
+        try {
+            handleCollapseAction(action);
+        } catch (e) {
+            logger.error("Failed to handle category collapse", e);
+        }
+        return args;
+    }));
+
     cleanup(after(CategoryCollapseStore, "getCollapsedCategories", (ret: Record<string, boolean>) => {
         const result = { ...ret };
         Object.entries(getState().favoriteChannels).forEach(([id, entry]) => {
@@ -814,6 +832,37 @@ function patchCategoryCollapseStore(cleanup: PluginCleanupApi) {
         });
         return result;
     }));
+}
+
+/** Applies a CATEGORY_COLLAPSE, CATEGORY_EXPAND or *_ALL action to the custom favorites */
+function handleCollapseAction(action: any) {
+    const { type } = action;
+    diagnostics.collapseActions = [{ type, keys: Object.keys(action) }, ...diagnostics.collapseActions].slice(0, 5);
+
+    const state = getState();
+    let ids: string[];
+    let collapsed: boolean;
+    switch (type) {
+        case "CATEGORY_COLLAPSE":
+        case "CATEGORY_EXPAND":
+            if (state.favoriteChannels[action.id]?.type !== ENTRY_TYPE_CATEGORY) return;
+            ids = [action.id];
+            collapsed = type === "CATEGORY_COLLAPSE";
+            break;
+        case "CATEGORY_COLLAPSE_ALL":
+        case "CATEGORY_EXPAND_ALL":
+            if (action.guildId !== FAVORITES_GUILD_ID) return;
+            ids = Object.keys(state.favoriteChannels).filter(id => state.favoriteChannels[id].type === ENTRY_TYPE_CATEGORY);
+            collapsed = type === "CATEGORY_COLLAPSE_ALL";
+            break;
+        default:
+            return;
+    }
+
+    if (ids.every(id => !!state.favoriteChannels[id].collapsed === collapsed)) return;
+    const next = clone(state);
+    ids.forEach(id => { next.favoriteChannels[id].collapsed = collapsed; });
+    setState(next);
 }
 
 function patchWrites(cleanup: PluginCleanupApi) {
