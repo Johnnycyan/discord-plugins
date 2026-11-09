@@ -126,7 +126,27 @@ function recordEvent(label: string, detail?: unknown) {
     try {
         if (detail !== undefined) text += ` ${JSON.stringify(summarize(detail))}`;
     } catch { }
-    diagnostics.events = [`${new Date().toLocaleTimeString()} ${text.slice(0, 400)}`, ...diagnostics.events].slice(0, 25);
+    const now = new Date();
+    const time = `${now.toLocaleTimeString()}.${String(now.getMilliseconds()).padStart(3, "0")}`;
+    diagnostics.events = [`${time} ${text.slice(0, 600)}`, ...diagnostics.events].slice(0, 30);
+}
+
+/** The first frames of the current call stack, to see what triggered a call */
+function callerStack() {
+    const stack = String(new Error().stack ?? "").split("\n").slice(2, 9).map(line => line.trim()).join(" | ");
+    return stack || "no stack";
+}
+
+/** A category's collapsed state as the plugin, Discord's store and the official favorites see it */
+function collapseState(id: string) {
+    const official = UserSettingsProtoStore?.settings?.favorites?.favoriteChannels?.[id];
+    let store: unknown;
+    try {
+        store = CategoryCollapseStore.isCollapsed(id);
+    } catch (e) {
+        store = "threw";
+    }
+    return { custom: getState().favoriteChannels[id]?.collapsed ?? null, store, official: official ? official.collapsed ?? false : "absent" };
 }
 
 /** Every function name on an object and its prototypes, Object.prototype excluded */
@@ -872,6 +892,7 @@ function patchCategoryCollapseStore(cleanup: PluginCleanupApi) {
 /** Applies a CATEGORY_COLLAPSE, CATEGORY_EXPAND or *_ALL action to the custom favorites */
 function handleCollapseAction(action: any) {
     const { type } = action;
+    recordEvent(`dispatch ${type} ${action.id ?? action.guildId ?? ""} state before ${JSON.stringify(action.id ? collapseState(action.id) : null)} from ${callerStack()}`);
     diagnostics.collapseActions = [{ type, keys: Object.keys(action) }, ...diagnostics.collapseActions].slice(0, 5);
 
     const state = getState();
@@ -927,7 +948,12 @@ function patchWrites(cleanup: PluginCleanupApi) {
         Object.keys(mod).forEach(name => {
             if (typeof mod[name] !== "function") return;
             cleanup(before(mod, name, (args: any[]) => {
-                recordEvent(`FavoriteActions.${name}`, args);
+                if (name === "setFavoriteCategoriesCollapsed") {
+                    const id = args.find((arg: unknown) => typeof arg === "string");
+                    recordEvent(`FavoriteActions.${name} ${JSON.stringify(args)} state before ${JSON.stringify(id ? collapseState(id) : null)} from ${callerStack()}`);
+                } else {
+                    recordEvent(`FavoriteActions.${name}`, args);
+                }
                 return args;
             }));
         });
