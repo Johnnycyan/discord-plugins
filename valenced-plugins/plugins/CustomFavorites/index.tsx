@@ -105,8 +105,6 @@ const diagnostics = {
     collapseActions: [] as { type: string; keys: string[]; }[],
     /** Recent calls into Discord's favorites actions, settings writes, and errors */
     events: [] as string[],
-    /** Count of each channel, guild and cache related dispatch since start */
-    dispatchTypes: {} as Record<string, number>,
 };
 
 /** Short, JSON-safe summary of a value for the event log */
@@ -128,27 +126,7 @@ function recordEvent(label: string, detail?: unknown) {
     try {
         if (detail !== undefined) text += ` ${JSON.stringify(summarize(detail))}`;
     } catch { }
-    const now = new Date();
-    const time = `${now.toLocaleTimeString()}.${String(now.getMilliseconds()).padStart(3, "0")}`;
-    diagnostics.events = [`${time} ${text.slice(0, 600)}`, ...diagnostics.events].slice(0, 30);
-}
-
-/** The first frames of the current call stack, to see what triggered a call */
-function callerStack() {
-    const stack = String(new Error().stack ?? "").split("\n").slice(2, 9).map(line => line.trim()).join(" | ");
-    return stack || "no stack";
-}
-
-/** A category's collapsed state as the plugin, Discord's store and the official favorites see it */
-function collapseState(id: string) {
-    const official = UserSettingsProtoStore?.settings?.favorites?.favoriteChannels?.[id];
-    let store: unknown;
-    try {
-        store = CategoryCollapseStore.isCollapsed(id);
-    } catch (e) {
-        store = "threw";
-    }
-    return { custom: getState().favoriteChannels[id]?.collapsed ?? null, store, official: official ? official.collapsed ?? false : "absent" };
+    diagnostics.events = [`${new Date().toLocaleTimeString()} ${text.slice(0, 400)}`, ...diagnostics.events].slice(0, 25);
 }
 
 /** Every function name on an object and its prototypes, Object.prototype excluded */
@@ -164,59 +142,6 @@ function functionNames(obj: any) {
         current = Object.getPrototypeOf(current);
     }
     return [...names].sort();
-}
-
-/** Loaded modules with an export about loading channels lazily */
-const withChannelLoaderExport = createFilterGenerator<[]>(
-    (_, __, exports) => {
-        if (exports == null || (typeof exports !== "object" && typeof exports !== "function")) return false;
-        try {
-            return [exports, exports.default].some(target => target != null && (typeof target === "object" || typeof target === "function")
-                && Object.keys(target).some(key => /lazy|preload|loadChannel|channelLoader|fetchChannel|requestChannel|ensureChannel/i.test(key)));
-        } catch {
-            return false;
-        }
-    },
-    () => "johnnycyan.custom-favorites.channelLoaderExport",
-    FilterScopes.Initialized,
-);
-
-function findChannelLoaderModules() {
-    const found: { id: number; keys: string[]; }[] = [];
-    for (const [exports, id] of findModules(withChannelLoaderExport(), { returnNamespace: true } as any) as any) {
-        const keys = new Set<string>();
-        try {
-            [exports, exports?.default].forEach((target: any) => {
-                if (target == null || (typeof target !== "object" && typeof target !== "function")) return;
-                Object.keys(target).filter(key => /lazy|preload|load|fetch|request|ensure|channel/i.test(key)).forEach(key => keys.add(key));
-            });
-        } catch { }
-        found.push({ id, keys: [...keys].slice(0, 25) });
-        if (found.length >= 30) break;
-    }
-    return found;
-}
-
-/** Which favorited channels Discord has loaded, and how they overlap with the official Favorites */
-function channelLoadReport() {
-    const entries = getState().favoriteChannels;
-    const ids = Object.keys(entries).filter(id => entries[id].type !== ENTRY_TYPE_CATEGORY);
-    const official = new Set(Object.keys(UserSettingsProtoStore?.settings?.favorites?.favoriteChannels ?? {}));
-    const loaded = ids.filter(id => ChannelStore.getChannel(id) != null);
-    const missing = ids.filter(id => ChannelStore.getChannel(id) == null);
-    return {
-        total: ids.length,
-        loaded: loaded.length,
-        missing: missing.length,
-        inOfficial: ids.filter(id => official.has(id)).length,
-        loadedInOfficial: loaded.filter(id => official.has(id)).length,
-        missingInOfficial: missing.filter(id => official.has(id)).length,
-        loadedSample: loaded.slice(0, 5).map(id => {
-            const channel = ChannelStore.getChannel(id);
-            return { id, type: channel.type, guildLoaded: channel.guild_id ? GuildStore.getGuild(channel.guild_id) != null : null, inOfficial: official.has(id) };
-        }),
-        missingSample: missing.slice(0, 5),
-    };
 }
 
 /** Loaded modules with an export named like "favorite", to spot renamed Discord APIs */
@@ -304,11 +229,6 @@ function buildDiagnostics() {
             return channel == null ? null : { constructor: channel.constructor?.name, type: channel.type, guild_id: channel.guild_id, hasMerge: typeof channel.merge === "function" };
         }),
         favoriteStores: tryRun(() => Object.keys(Stores).filter(name => /favorit/i.test(name))),
-        channels: tryRun(channelLoadReport),
-        channelStoreFunctions: tryRun(() => functionNames(ChannelStore)),
-        channelStores: tryRun(() => Object.keys(Stores).filter(name => /channel|lazy|cache|guild/i.test(name))),
-        channelLoaderModules: tryRun(findChannelLoaderModules),
-        dispatchTypes: diagnostics.dispatchTypes,
         favoriteModules: tryRun(findFavoriteModules),
         patches: diagnostics.patches,
         storeMethods: diagnostics.storeMethods,
@@ -929,10 +849,6 @@ function patchCategoryCollapseStore(cleanup: PluginCleanupApi) {
         const action = args[0];
         const type: unknown = action?.type;
         if (typeof type === "string" && /FAVORITE/.test(type)) recordEvent(`dispatch ${type}`, action);
-        if (typeof type === "string" && /CHANNEL|LAZY|LOAD|CACHE|GUILD|CONNECTION|READY/.test(type)
-            && (type in diagnostics.dispatchTypes || Object.keys(diagnostics.dispatchTypes).length < 80)) {
-            diagnostics.dispatchTypes[type] = (diagnostics.dispatchTypes[type] ?? 0) + 1;
-        }
         if (typeof type !== "string" || !type.startsWith("CATEGORY_")) return args;
         try {
             handleCollapseAction(action);
@@ -956,7 +872,6 @@ function patchCategoryCollapseStore(cleanup: PluginCleanupApi) {
 /** Applies a CATEGORY_COLLAPSE, CATEGORY_EXPAND or *_ALL action to the custom favorites */
 function handleCollapseAction(action: any) {
     const { type } = action;
-    recordEvent(`dispatch ${type} ${action.id ?? action.guildId ?? ""} state before ${JSON.stringify(action.id ? collapseState(action.id) : null)} from ${callerStack()}`);
     diagnostics.collapseActions = [{ type, keys: Object.keys(action) }, ...diagnostics.collapseActions].slice(0, 5);
 
     const state = getState();
@@ -1012,12 +927,7 @@ function patchWrites(cleanup: PluginCleanupApi) {
         Object.keys(mod).forEach(name => {
             if (typeof mod[name] !== "function") return;
             cleanup(before(mod, name, (args: any[]) => {
-                if (name === "setFavoriteCategoriesCollapsed") {
-                    const id = args.find((arg: unknown) => typeof arg === "string");
-                    recordEvent(`FavoriteActions.${name} ${JSON.stringify(args)} state before ${JSON.stringify(id ? collapseState(id) : null)} from ${callerStack()}`);
-                } else {
-                    recordEvent(`FavoriteActions.${name}`, args);
-                }
+                recordEvent(`FavoriteActions.${name}`, args);
                 return args;
             }));
         });
