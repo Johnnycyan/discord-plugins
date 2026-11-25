@@ -1,5 +1,5 @@
 // @description Keeps Favorites on this device instead of Discord's servers, synced with the Equicord and Kettu plugins
-// @version 0.2.1
+// @version 0.3.2
 // @author Johnnycyan
 
 /*
@@ -305,16 +305,58 @@ phoenix.ui.onEvent("rowLongPress", ev => {
 // Closing the menu without pressing anything
 phoenix.ui.onEvent("dismiss", () => stopIntercepting());
 
-/** Channel type from Phoenix's cache, which keys rows by the id padded to 20 digits */
+// ---------- Phoenix's cache ----------
+
+// Rows are JSON. Ids in keys are padded to 20 digits; channels are keyed `<guild id>:<channel id>`
+// (guild 0 for DMs), guilds by their id.
+
+const pad = (id: string) => id.padStart(20, "0");
+const unpad = (id: string) => id.replace(/^0+(?=\d)/, "");
+
+interface CachedChannel { guildId: string | null; data: Record<string, unknown> | null; }
+
+const channelCache = new Map<string, CachedChannel | null>();
+
+async function getCachedChannel(channelId: string): Promise<CachedChannel | null> {
+    if (channelCache.has(channelId)) return channelCache.get(channelId)!;
+    const [row] = await phoenix.stores.sql<{ k: string; v: string; }>("SELECT k, hex(v) AS v FROM channels WHERE k LIKE ? LIMIT 1", `%:${pad(channelId)}`);
+    let result: CachedChannel | null = null;
+    if (row) {
+        const guild = unpad(row.k.split(":")[0]);
+        let data: Record<string, unknown> | null = null;
+        try {
+            data = JSON.parse(decodeUtf8(fromHex(row.v)));
+        } catch { }
+        result = { guildId: guild === "0" ? null : guild, data };
+    }
+    channelCache.set(channelId, result);
+    return result;
+}
+
 async function getChannelType(channelId: string): Promise<number | null> {
     try {
-        const [row] = await phoenix.stores.sql<{ v: string; }>("SELECT hex(v) AS v FROM channels WHERE k = ? OR k = ?", channelId.padStart(20, "0"), channelId);
-        const type = row ? JSON.parse(decodeUtf8(fromHex(row.v)))?.type : null;
+        const type = (await getCachedChannel(channelId))?.data?.type;
         return typeof type === "number" ? type : null;
     } catch (e) {
         log.warn("Couldn't read the channel type", e);
         return null;
     }
+}
+
+const guildIconCache = new Map<string, string | null>();
+
+/** The guild's icon hash, from `properties.icon` of its cached row */
+async function getGuildIcon(guildId: string): Promise<string | null> {
+    if (guildIconCache.has(guildId)) return guildIconCache.get(guildId)!;
+    const [row] = await phoenix.stores.sql<{ v: string; }>("SELECT hex(v) AS v FROM guilds WHERE k = ?", pad(guildId));
+    let icon: string | null = null;
+    try {
+        const data = row ? JSON.parse(decodeUtf8(fromHex(row.v))) : null;
+        const value = data?.properties?.icon ?? data?.icon;
+        icon = typeof value === "string" ? value : null;
+    } catch { }
+    guildIconCache.set(guildId, icon);
+    return icon;
 }
 
 async function addFavorite(channelId: string) {
@@ -335,6 +377,106 @@ async function addFavorite(channelId: string) {
     setState(next);
     phoenix.ui.toast("Added to Favorites");
 }
+
+// ---------- Server icons in the Favorites list ----------
+
+// Each channel row holds a `navigation.channel:<id>` node. Its container stacks children on top of each
+// other, so the icon goes into the row's side-by-side layout instead: the first node under the channel
+// node with several children (type icon, name, ...). Rows are recreated as the list scrolls, so icons
+// are mounted from onNode. `channel-list-panel` holds a header and the pages (one channel list each,
+// two levels down). While Favorites is open the header has a `favorites-add` node; a server's page has
+// its own `guild.menu` node, which rules out server pages Phoenix keeps around.
+
+const ICON_SIZE = 20;
+const CHANNEL_LIST_PANEL = "channel-list-panel";
+const FAVORITES_MARKER = "favorites-add";
+const GUILD_PAGE_MARKER = "guild.menu";
+
+/** Channel node id -> unmount */
+const iconMounts = new Map<number, () => void>();
+
+/** The row's side-by-side layout: down single children from the channel node to one with several */
+function iconTarget(rowNode: number): number | null {
+    let current = rowNode;
+    for (let i = 0; i < 6; i++) {
+        const children = phoenix.ui.node(current)?.children ?? [];
+        if (children.length >= 2) return current;
+        if (children.length !== 1) return null;
+        current = children[0];
+    }
+    return null;
+}
+
+/** The channel list panel and the page in it that a node belongs to */
+function pageOf(id: number): { panel: number; page: number; } | null {
+    let current: number | null = id;
+    for (let i = 0; current != null && i < 20; i++) {
+        const parent: number | null = phoenix.ui.node(current)?.parent ?? null;
+        const grandparent = parent == null ? null : phoenix.ui.node(parent)?.parent ?? null;
+        if (grandparent != null && phoenix.ui.node(grandparent)?.accessibilityId === CHANNEL_LIST_PANEL) return { panel: grandparent, page: current };
+        current = parent;
+    }
+    return null;
+}
+
+function inFavoritesList(rowNode: number) {
+    const where = pageOf(rowNode);
+    return where != null
+        && phoenix.ui.findDown(where.panel, { exact: FAVORITES_MARKER }, 6) != null
+        && phoenix.ui.findDown(where.page, { exact: GUILD_PAGE_MARKER }, 8) == null;
+}
+
+async function mountGuildIcon(rowNode: number, channelId: string) {
+    if (iconMounts.has(rowNode) || !settings.showGuildIcons) return;
+    if (!getState().favoriteChannels[channelId]) return;
+    if (!inFavoritesList(rowNode)) return;
+
+    const guildId = (await getCachedChannel(channelId))?.guildId;
+    const icon = guildId ? await getGuildIcon(guildId) : null;
+    // Looked up after the awaits: the row's children may not exist yet when its node is created
+    const target = iconTarget(rowNode);
+    if (!guildId || !icon || target == null || iconMounts.has(rowNode)) return;
+
+    // A full-height column centers the icon on the row
+    iconMounts.set(rowNode, phoenix.ui.mount(target, {
+        kind: "view",
+        props: { direction: "column", height: "fill", justify: "center", margin: [0, 0, 8, 0] },
+        children: [{
+            kind: "image",
+            props: {
+                uri: `https://cdn.discordapp.com/icons/${guildId}/${icon}.png?size=64`,
+                width: ICON_SIZE,
+                height: ICON_SIZE,
+                radius: ICON_SIZE / 2,
+            },
+        }],
+    }, { before: "start" }));
+
+    // Forget rows the list has thrown away
+    for (const id of [...iconMounts.keys()]) {
+        if (phoenix.ui.node(id) == null) iconMounts.delete(id);
+    }
+}
+
+function mountIconsOnScreen() {
+    for (const id of phoenix.ui.find({ prefix: CHANNEL_NODE_PREFIX })) {
+        const channelId = phoenix.ui.node(id)?.accessibilityId?.slice(CHANNEL_NODE_PREFIX.length);
+        if (channelId) void mountGuildIcon(id, channelId).catch(e => log.error("Failed to show a server icon", e));
+    }
+}
+
+function removeIcons() {
+    iconMounts.forEach(remove => remove());
+    iconMounts.clear();
+}
+
+phoenix.ui.onNode({ prefix: CHANNEL_NODE_PREFIX }, n => {
+    const channelId = n.accessibilityId?.slice(CHANNEL_NODE_PREFIX.length);
+    if (channelId) void mountGuildIcon(n.id, channelId).catch(e => log.error("Failed to show a server icon", e));
+});
+
+// In case the Favorites page's marker shows up after its first rows
+phoenix.ui.onNode({ exact: FAVORITES_MARKER }, () => mountIconsOnScreen());
 
 // ---------- Settings Phoenix receives ----------
 
@@ -380,6 +522,12 @@ if (settingsUpdate) {
 
 let syncStatus: SyncStatus = { state: "off" };
 
+/**
+ * Starts the message of errors where the server couldn't be reached. Android cuts the network of
+ * apps in the background, so these come and go on their own: no toast, the sync retries.
+ */
+const UNREACHABLE = "Can't reach the sync server";
+
 const sync = createSync({
     getConfig: () => ({ url: settings.syncUrl.trim(), token: settings.syncToken.trim() }),
     getLocal: (): SyncData => clone({ state: getState() as SyncData["state"], placementHistory: getPlacementHistory() as SyncData["placementHistory"] }),
@@ -395,11 +543,17 @@ const sync = createSync({
     },
     async request(method, url, token, body) {
         try {
-            const res = await phoenix.fetch(url, {
-                method,
-                headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-                body: body === undefined ? undefined : JSON.stringify(body),
-            });
+            let res: Phoenix.FetchResponse;
+            try {
+                res = await phoenix.fetch(url, {
+                    method,
+                    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+                    body: body === undefined ? undefined : JSON.stringify(body),
+                });
+            } catch (e) {
+                // phoenix.fetch rejects only when no answer came back (HTTP errors resolve)
+                throw new Error(`${UNREACHABLE} (${(e as Error)?.message ?? e})`);
+            }
             return { status: res.status, json: async () => res.json() };
         } finally {
             runDueTimers();
@@ -419,7 +573,9 @@ const sync = createSync({
         throw new Error("Paused: choose which favorites to keep (Sync now in the plugin settings)");
     },
     onStatus(status) {
-        const failed = status.state === "error" && syncStatus.state !== "error";
+        const isProblem = (s: SyncStatus) => s.state === "error" && !s.message?.startsWith(UNREACHABLE);
+        // Toast a problem once, not again on each retry
+        const failed = isProblem(status) && !isProblem(syncStatus);
         syncStatus = status.state === "ok" ? status : { ...status, lastSync: syncStatus.lastSync };
         if (failed) phoenix.ui.toast(`Favorites sync: ${status.message ?? "error"}`);
     },
@@ -506,6 +662,16 @@ async function maybeOfferImport() {
 // ---------- Settings page ----------
 
 const settings = phoenix.settings.define({
+    showGuildIcons: {
+        type: "switch",
+        title: "Show server icons",
+        description: "Show the server icon to the left of favorited server channels",
+        default: true,
+        onChange(value) {
+            if (value) mountIconsOnScreen();
+            else removeIcons();
+        },
+    },
     syncUrl: {
         type: "text",
         title: "Sync server URL",
@@ -559,6 +725,7 @@ async function start() {
 
 phoenix.onUnload(() => {
     stopIntercepting();
+    removeIcons();
     sync.stop();
     pendingTimers.clear();
     // Hand Phoenix Discord's favorites back

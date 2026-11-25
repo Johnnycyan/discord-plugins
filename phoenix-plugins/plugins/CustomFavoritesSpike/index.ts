@@ -1,5 +1,5 @@
 // @description Spike: logs how Phoenix loads and saves Favorites, to plan the CustomFavorites port
-// @version 0.6.1
+// @version 0.8.1
 // @author Johnnycyan
 
 // Changes nothing in the app: it only observes. Open the report with /cfspike or from the plugin's settings.
@@ -12,7 +12,7 @@ const MAX_ENTRY_CHARS = 40000;
 type Entry = { at: string; tag: string; text: string; };
 
 /** Bump with @version: a new version starts a fresh report */
-const VERSION = "0.6.1";
+const VERSION = "0.8.1";
 
 const report: Entry[] = phoenix.storage.get("reportVersion") === VERSION ? phoenix.storage.get<Entry[]>("report") ?? [] : [];
 phoenix.storage.set("reportVersion", VERSION);
@@ -382,7 +382,8 @@ guard("nodes", () => {
     phoenix.ui.onNode({ prefix: "" }, n => {
         if (!n.accessibilityId || seenIds.has(n.accessibilityId) || seenIds.size > 3000) return;
         seenIds.add(n.accessibilityId);
-        if (/fav|channel|menu|sheet|action|mute|mark|copy|invite|notif/i.test(n.accessibilityId)) {
+        // Channel rows are covered by the icon experiment's notes
+        if (!n.accessibilityId.startsWith("navigation.channel:") && /fav|channel|menu|sheet|action|mute|mark|copy|invite|notif/i.test(n.accessibilityId)) {
             note(`node ${n.accessibilityId}`, { id: n.id, kind: n.kind, on: n.on, sheet: n.sheet, parents: ancestry(n.parent ?? n.id).slice(0, 4) });
         }
     });
@@ -425,6 +426,141 @@ function noteSeenIds() {
     note("node ids", [...seenIds].sort().join("\n"));
 }
 
+// ---------- 7. Server icons on channel rows ----------
+
+// Mirrors CustomFavorites' icon code (row container, Favorites page check, cache lookups) and counts
+// where each row stops, with switches for the wrapper and the image source to find what fails.
+
+const ICON_SIZE = 20;
+const FALLBACK_ICON = "res://ic_mana_puzzle_piece_plus";
+const CHANNEL_LIST_PANEL = "channel-list-panel";
+const FAVORITES_MARKER = "favorites-add";
+
+/** Row container id -> unmount */
+const iconMounts = new Map<number, () => void>();
+const iconStats: Record<string, number> = {};
+const bump = (key: string) => { iconStats[key] = (iconStats[key] ?? 0) + 1; };
+let iconDetailNotes = 0;
+let guildShapeNoted = false;
+
+const pad20 = (id: string) => id.padStart(20, "0");
+
+function hexJson(hex: string): Record<string, any> | null {
+    try {
+        return JSON.parse(utf8(fromHex(hex)));
+    } catch {
+        return null;
+    }
+}
+
+/** Channels are keyed `<guild>:<channel>` (guild 0 for DMs) */
+async function guildOfChannel(channelId: string): Promise<string | null | undefined> {
+    const [row] = await phoenix.stores.sql<{ k: string; }>("SELECT k FROM channels WHERE k LIKE ? LIMIT 1", `%:${pad20(channelId)}`);
+    if (!row) return undefined;
+    const guild = row.k.split(":")[0].replace(/^0+(?=\d)/, "");
+    return guild === "0" ? null : guild;
+}
+
+async function guildIcon(guildId: string): Promise<string | null> {
+    const [row] = await phoenix.stores.sql<{ v: string; }>("SELECT hex(v) AS v FROM guilds WHERE k = ?", pad20(guildId));
+    const data = row ? hexJson(row.v) : null;
+    if (data && !guildShapeNoted) {
+        guildShapeNoted = true;
+        note("guild row shape", { keys: Object.keys(data), propertiesKeys: data.properties ? Object.keys(data.properties) : null });
+    }
+    const icon = data?.properties?.icon ?? data?.icon;
+    return typeof icon === "string" ? icon : null;
+}
+
+/** The channel list panel and the page in it that a node belongs to */
+function pageOf(id: number): { panel: number; page: number; } | null {
+    let current: number | null = id;
+    for (let i = 0; current != null && i < 20; i++) {
+        const parent: number | null = phoenix.ui.node(current)?.parent ?? null;
+        const grandparent = parent == null ? null : phoenix.ui.node(parent)?.parent ?? null;
+        if (grandparent != null && phoenix.ui.node(grandparent)?.accessibilityId === CHANNEL_LIST_PANEL) return { panel: grandparent, page: current };
+        current = parent;
+    }
+    return null;
+}
+
+function iconUri(guildId: string, icon: string) {
+    switch (settings.iconSource) {
+        case "builtin": return FALLBACK_ICON;
+        case "webp": return `https://cdn.discordapp.com/icons/${guildId}/${icon}.webp?size=64`;
+        case "media": return `https://media.discordapp.net/icons/${guildId}/${icon}.png?size=64`;
+        default: return `https://cdn.discordapp.com/icons/${guildId}/${icon}.png?size=64`;
+    }
+}
+
+async function mountIcon(rowNode: number, channel: string) {
+    const mode = settings.iconMode;
+    if (mode === "off") return;
+    bump("rows");
+    const container = phoenix.ui.node(rowNode)?.parent;
+    if (container == null) return bump("stop: no container");
+    if (iconMounts.has(container)) return bump("stop: already has icon");
+    const where = pageOf(rowNode);
+    if (where == null) return bump("stop: no page");
+    // The Favorites marker is in the panel's header, a server page has its own guild.menu
+    if (phoenix.ui.findDown(where.panel, { exact: FAVORITES_MARKER }, 6) == null) return bump("stop: Favorites not open");
+    if (phoenix.ui.findDown(where.page, { exact: "guild.menu" }, 8) != null) return bump("stop: a server's page");
+    const guildId = await guildOfChannel(channel);
+    if (guildId === undefined) return bump("stop: channel not in cache");
+    if (guildId === null) return bump("stop: DM");
+    const icon = await guildIcon(guildId);
+    if (!icon) return bump("stop: guild has no icon");
+    if (iconMounts.has(container)) return bump("stop: already has icon");
+    if (phoenix.ui.node(container) == null) return bump("stop: row gone");
+
+    const uri = iconUri(guildId, icon);
+    const image: Phoenix.MountNode = { kind: "image", props: { uri, width: ICON_SIZE, height: ICON_SIZE, radius: ICON_SIZE / 2 } };
+    const node: Phoenix.MountNode = mode === "wrapped"
+        ? { kind: "view", props: { direction: "column", height: "fill", justify: "center", margin: [12, 0, 0, 0] }, children: [image] }
+        : { ...image, props: { ...image.props, margin: [12, 0, 8, 0] } };
+    try {
+        iconMounts.set(container, phoenix.ui.mount(container, node, { before: "start" }));
+        bump("mounted");
+        if (iconDetailNotes < 4) {
+            iconDetailNotes++;
+            note(`icon mounted ${channel}`, { mode, source: settings.iconSource, container, uri, containerChildren: phoenix.ui.node(container)?.children.length });
+        }
+    } catch (e) {
+        bump("stop: mount threw");
+        note("icon mount failed", `${(e as Error)?.message ?? e}`);
+    }
+}
+
+function removeIcons() {
+    iconMounts.forEach(remove => remove());
+    iconMounts.clear();
+}
+
+guard("icons", () => {
+    phoenix.ui.onNode({ prefix: CHANNEL_PREFIX }, n => {
+        const channel = n.accessibilityId?.slice(CHANNEL_PREFIX.length);
+        if (channel) void mountIcon(n.id, channel).catch(e => { bump("stop: error"); note("icon error", String(e)); });
+    });
+});
+
+/** Rows of the visible channel lists with every node, to see where the name and type icon are */
+function dumpRows() {
+    const rows = phoenix.ui.find({ prefix: CHANNEL_PREFIX }).slice(0, 3);
+    if (!rows.length) {
+        note("rows", "no channel rows on screen");
+        return;
+    }
+    for (const id of rows) {
+        const n = phoenix.ui.node(id);
+        const container = n?.parent ?? id;
+        note(`row ${n?.accessibilityId}`, { node: id, container, page: pageOf(id), tree: treeLines(container, true) });
+    }
+}
+
+function noteIconStats() {
+    note("icon stats", { ...iconStats, liveMounts: iconMounts.size, mode: settings.iconMode, source: settings.iconSource });
+}
+
 // ---------- Entry points ----------
 
 /** Plugins can't write files, so the report goes to report-receiver.mjs on the PC */
@@ -435,6 +571,7 @@ async function sendReport() {
         return;
     }
     noteSeenIds();
+    noteIconStats();
     try {
         const res = await phoenix.fetch(url, { method: "POST", headers: { "content-type": "text/plain" }, body: reportText() });
         phoenix.ui.toast(res.ok ? `Sent ${report.length} entries: ${res.text()}` : `Send failed: HTTP ${res.status}`);
@@ -451,6 +588,30 @@ const settings = phoenix.settings.define({
         default: "",
     },
     send: { type: "button", title: "Send report to PC", onPress: () => void sendReport() },
+    iconMode: {
+        type: "select",
+        title: "Test icons on channel rows",
+        description: "Mount a server icon on each new Favorites row. Reopen Favorites after changing.",
+        options: [
+            { value: "off", label: "Off" },
+            { value: "wrapped", label: "Centered (as in CustomFavorites)" },
+            { value: "plain", label: "Plain image" },
+        ],
+        default: "off",
+        onChange: removeIcons,
+    },
+    iconSource: {
+        type: "select",
+        title: "Test icon image",
+        options: [
+            { value: "cdn", label: "CDN, png" },
+            { value: "webp", label: "CDN, webp" },
+            { value: "media", label: "media.discordapp.net, png" },
+            { value: "builtin", label: "Built-in puzzle icon" },
+        ],
+        default: "cdn",
+    },
+    rows: { type: "button", title: "Dump channel rows", description: "With a channel list on screen", onPress: () => guard("rows", dumpRows) },
     open: { type: "button", title: "Open report", onPress: openReport },
     tree: { type: "button", title: "Dump view tree", description: "Open the Favorites screen first", onPress: () => guard("tree", dumpTree) },
     cache: { type: "button", title: "Dump cache tables", onPress: () => void dumpCache().catch(e => note("sql:error", String(e))) },
@@ -472,6 +633,7 @@ phoenix.commands.register({
         const arg = args.trim();
         if (arg === "send") return sendReport();
         if (arg === "tree") guard("tree", dumpTree);
+        if (arg === "rows") guard("rows", dumpRows);
         openReport();
     },
 });
