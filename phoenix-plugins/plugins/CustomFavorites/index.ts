@@ -1,5 +1,5 @@
 // @description Keeps Favorites on this device instead of Discord's servers, synced with the Equicord and Kettu plugins
-// @version 0.3.2
+// @version 0.3.3
 // @author Johnnycyan
 
 /*
@@ -395,13 +395,21 @@ const GUILD_PAGE_MARKER = "guild.menu";
 /** Channel node id -> unmount */
 const iconMounts = new Map<number, () => void>();
 
-/** The row's side-by-side layout: down single children from the channel node to one with several */
+/**
+ * The row's side-by-side layout: down single children from the channel node to one with several.
+ * Its first child is the type icon, which has no children. When the first child has some, the node
+ * is a column (a voice channel's line with its users under it), so look inside that first child.
+ */
 function iconTarget(rowNode: number): number | null {
     let current = rowNode;
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 8; i++) {
         const children = phoenix.ui.node(current)?.children ?? [];
-        if (children.length >= 2) return current;
-        if (children.length !== 1) return null;
+        if (children.length === 1) {
+            current = children[0];
+            continue;
+        }
+        if (children.length < 2) return null;
+        if (!phoenix.ui.node(children[0])?.children.length) return current;
         current = children[0];
     }
     return null;
