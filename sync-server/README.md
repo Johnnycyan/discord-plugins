@@ -79,5 +79,5 @@ After that, every change is uploaded about a second later and shows up on your o
 ## API
 
 - `GET /v1/health` → `{ "ok": true }` (no token needed)
-- `GET /v1/favorites` → `{ revision, updatedAt, data }`. With `?since=<revision>&wait=1`, waits up to 25 s for a newer revision and answers `204` if there is none.
+- `GET /v1/favorites` → `{ revision, updatedAt, data }`. With `?since=<revision>&wait=1`, waits up to 25 s for a newer revision and answers `204` if there is none. Add `&waitMs=<ms>` to wait less (at most 25 s).
 - `PUT /v1/favorites` with `{ baseRevision, data }` → `{ revision, updatedAt }`, or `409` with the current document if `baseRevision` is out of date.

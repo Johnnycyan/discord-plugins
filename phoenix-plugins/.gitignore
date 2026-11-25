@@ -1,0 +1,5 @@
+# Downloaded by `npm run types`, Sunbird has no license
+phoenix.d.ts
+
+# Spike reports saved by `npm run receive`, they hold account data
+reports/

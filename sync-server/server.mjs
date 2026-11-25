@@ -85,6 +85,8 @@ async function handle(req, res) {
         const since = Number(url.searchParams.get("since"));
         // Hold the request until something newer than `since` exists
         if (url.searchParams.has("wait") && since === doc.revision) {
+            // Clients whose HTTP gives up sooner (Phoenix: 15 s) ask for a shorter wait
+            const waitMs = Math.min(Number(url.searchParams.get("waitMs")) || MAX_WAIT_MS, MAX_WAIT_MS);
             const changed = await new Promise(resolve => {
                 const waiter = {
                     resolve(value) {
@@ -93,7 +95,7 @@ async function handle(req, res) {
                         resolve(value);
                     }
                 };
-                const timer = setTimeout(() => waiter.resolve(false), MAX_WAIT_MS);
+                const timer = setTimeout(() => waiter.resolve(false), waitMs);
                 waiters.add(waiter);
                 // Client gave up (res closes before we answer)
                 res.on("close", () => waiter.resolve(false));

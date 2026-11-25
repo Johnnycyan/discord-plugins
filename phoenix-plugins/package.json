@@ -1,0 +1,16 @@
+{
+    "name": "phoenix-plugins",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "types": "node fetch-types.mjs",
+        "build": "node build.mjs",
+        "watch": "node build.mjs --watch",
+        "typecheck": "tsc -p .",
+        "receive": "node report-receiver.mjs"
+    },
+    "devDependencies": {
+        "esbuild": "0.25.10",
+        "typescript": "5.9.3"
+    }
+}

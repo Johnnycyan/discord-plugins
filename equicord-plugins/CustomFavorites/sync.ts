@@ -1,5 +1,5 @@
 /*
- * CustomFavorites sync client, shared by the Equicord and Kettu plugins.
+ * CustomFavorites sync client, shared by the Equicord, Kettu and Phoenix plugins.
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * Talks to sync-server/server.mjs. One document per server; every device pushes its changes and
@@ -46,7 +46,21 @@ export interface SyncHost {
     chooseFirstSync(local: SyncData, remote: SyncData): Promise<"server" | "device">;
     onStatus(status: SyncStatus): void;
     log(...args: unknown[]): void;
+    /** Timers for runtimes without global setTimeout (Phoenix); defaults to the globals */
+    timers?: Timers;
+    /** How long the server may hold a long-poll request; for clients whose HTTP times out sooner than the server's 25 s */
+    longPollMs?: number;
 }
+
+export interface Timers {
+    setTimeout(callback: () => void, ms: number): unknown;
+    clearTimeout(handle: unknown): void;
+}
+
+const globalTimers: Timers = {
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
 
 export interface SyncStatus {
     state: "off" | "syncing" | "ok" | "error";
@@ -101,7 +115,8 @@ export function createSync(host: SyncHost) {
     let running = false;
     /** Bumped on stop/restart so a stale poll loop exits */
     let generation = 0;
-    let pushTimer: ReturnType<typeof setTimeout> | null = null;
+    const timers = host.timers ?? globalTimers;
+    let pushTimer: unknown = null;
     /** Serializes sync operations */
     let queue: Promise<unknown> = Promise.resolve();
 
@@ -183,8 +198,10 @@ export function createSync(host: SyncHost) {
 
     async function fetchRemote(since?: number): Promise<RemoteDoc | null> {
         const { url, token } = host.getConfig();
-        const query = since == null ? "" : `?since=${since}&wait=1`;
-        const res = await host.request("GET", endpoint(url) + query, token, undefined, LONG_POLL_TIMEOUT_MS);
+        const waitMs = host.longPollMs ? `&waitMs=${host.longPollMs}` : "";
+        const query = since == null ? "" : `?since=${since}&wait=1${waitMs}`;
+        const timeoutMs = host.longPollMs ? host.longPollMs + 10_000 : LONG_POLL_TIMEOUT_MS;
+        const res = await host.request("GET", endpoint(url) + query, token, undefined, timeoutMs);
         if (res.status === 204) return null;
         if (res.status === 200) return res.json();
         throw new Error(res.status === 401 ? "Wrong sync token" : `Download failed (HTTP ${res.status})`);
@@ -206,7 +223,7 @@ export function createSync(host: SyncHost) {
                 if (myGeneration !== generation) return;
                 host.log("Sync failed", e);
                 status("error", e instanceof Error ? e.message : String(e));
-                await new Promise(resolve => setTimeout(resolve, retryMs));
+                await new Promise<void>(resolve => timers.setTimeout(resolve, retryMs));
                 retryMs = Math.min(retryMs * 2, MAX_RETRY_MS);
                 first = true;
             }
@@ -216,7 +233,7 @@ export function createSync(host: SyncHost) {
     function stop() {
         running = false;
         generation++;
-        if (pushTimer) clearTimeout(pushTimer);
+        if (pushTimer) timers.clearTimeout(pushTimer);
         pushTimer = null;
     }
 
@@ -238,8 +255,8 @@ export function createSync(host: SyncHost) {
         /** Call after every local change; uploads shortly after the last one */
         notifyLocalChange() {
             if (!running) return;
-            if (pushTimer) clearTimeout(pushTimer);
-            pushTimer = setTimeout(() => {
+            if (pushTimer) timers.clearTimeout(pushTimer);
+            pushTimer = timers.setTimeout(() => {
                 pushTimer = null;
                 enqueue(async () => {
                     const meta = currentMeta();

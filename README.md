@@ -1,6 +1,6 @@
 # Discord plugins
 
-My Discord client plugins for [Equicord](https://github.com/Equicord/Equicord) (desktop and web) and the Discord mobile mods [Kettu](https://github.com/C0C0B01/Kettu) and [Valenced](https://github.com/Valenced/valenced).
+My Discord client plugins for [Equicord](https://github.com/Equicord/Equicord) (desktop and web), the Discord mobile mods [Kettu](https://github.com/C0C0B01/Kettu) and [Valenced](https://github.com/Valenced/valenced), and [Sunbird](https://github.com/sunbird-tools/sunbird) (Phoenix, Discord's Rust client in the Android alpha).
 
 ## Layout
 
@@ -9,6 +9,7 @@ My Discord client plugins for [Equicord](https://github.com/Equicord/Equicord) (
 | `equicord-plugins/<Name>/` | Equicord user plugins. Only plugin folders go here: Equicord treats every top-level entry as a plugin. |
 | `kettu-plugins/` | Kettu plugins and their esbuild build. See [kettu-plugins/README.md](kettu-plugins/README.md). |
 | `valenced-plugins/` | Valenced plugins, built with Valenced's plugin CLI. See [valenced-plugins/README.md](valenced-plugins/README.md). |
+| `phoenix-plugins/` | Sunbird plugins for Phoenix and their esbuild build. |
 | `sync-server/` | Self-hosted sync server for CustomFavorites. See [sync-server/README.md](sync-server/README.md). |
 | `Equicord/` | Upstream Equicord clone used to build, not committed. |
 | `_old/` | Local archive, not committed. |
@@ -31,6 +32,7 @@ cd Equicord && pnpm install
 - **Equicord:** `cd Equicord && pnpm build` (or `pnpm watch`). Update upstream with `git pull` in `Equicord/`; the plugins are untouched.
 - **Kettu:** `cd kettu-plugins && npm install && npm run build`.
 - **Valenced:** `cd valenced-plugins && bun install && bun run build && node package.mjs`.
+- **Phoenix:** `cd phoenix-plugins && npm install && npm run types && npm run build`, then install `dist/<Name>.js` in Sunbird from the file. `npm run types` downloads Sunbird's `phoenix.d.ts`, which isn't committed (Sunbird has no license).
 
 Pushing to `main` deploys `kettu-plugins/dist` to GitHub Pages, with the Valenced repository under `valenced/`, when `kettu-plugins/`, `valenced-plugins/` or `equicord-plugins/` changes.
 
@@ -39,4 +41,5 @@ Pushing to `main` deploys `kettu-plugins/dist` to GitHub Pages, with the Valence
 - **Equicord:** create `equicord-plugins/<Name>/index.ts(x)`.
 - **Kettu:** create `kettu-plugins/plugins/<Name>/index.tsx` and `manifest.json`.
 - **Valenced:** create `valenced-plugins/plugins/<Name>/index.tsx`, `manifest.json` and `tsconfig.json`.
-- **Shared code:** put the logic that does not touch the client in its own files in `equicord-plugins/<Name>/` (no `@api`, `@webpack`, Vendetta or `@valenced` imports) and import it from the Kettu and Valenced versions with a relative path. It must live inside the plugin folder: the Equicord launcher copies only that folder when it builds.
+- **Phoenix:** create `phoenix-plugins/plugins/<Name>/index.ts`, starting with `// @description`, `// @version` and `// @author` lines.
+- **Shared code:** put the logic that does not touch the client in its own files in `equicord-plugins/<Name>/` (no `@api`, `@webpack`, Vendetta, `@valenced` or `phoenix` use) and import it from the Kettu, Valenced and Phoenix versions with a relative path. It must live inside the plugin folder: the Equicord launcher copies only that folder when it builds.
