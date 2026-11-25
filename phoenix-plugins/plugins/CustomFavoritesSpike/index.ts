@@ -1,5 +1,5 @@
 // @description Spike: logs how Phoenix loads and saves Favorites, to plan the CustomFavorites port
-// @version 0.6.0
+// @version 0.6.1
 // @author Johnnycyan
 
 // Changes nothing in the app: it only observes. Open the report with /cfspike or from the plugin's settings.
@@ -12,7 +12,7 @@ const MAX_ENTRY_CHARS = 40000;
 type Entry = { at: string; tag: string; text: string; };
 
 /** Bump with @version: a new version starts a fresh report */
-const VERSION = "0.6.0";
+const VERSION = "0.6.1";
 
 const report: Entry[] = phoenix.storage.get("reportVersion") === VERSION ? phoenix.storage.get<Entry[]>("report") ?? [] : [];
 phoenix.storage.set("reportVersion", VERSION);
@@ -418,18 +418,8 @@ guard("longpress-rows", () => {
     }));
 });
 
-guard("intercept", () => {
-    phoenix.ui.onEvent("press", ev => {
-        if (ev.accessibilityId !== "Add to Favorites") return false;
-        guard("intercept", () => {
-            const guess = lastLongPress?.rows[lastLongPress.index]?.channel ?? null;
-            note("intercepted Add to Favorites", { guess, lastLongPress: lastLongPress && { list: lastLongPress.list, index: lastLongPress.index } });
-            phoenix.ui.toast(`Spike caught Add to Favorites (channel ${guess ?? "unknown"})`);
-        });
-        // Consumed: Phoenix should not see the press, so no Nitro upsell
-        return true;
-    }, { intercept: true });
-});
+// No press intercept here: while one exists, Sunbird's own buttons (choose dialogs, pages) stop
+// working. CustomFavorites intercepts only while a channel menu is open.
 
 function noteSeenIds() {
     note("node ids", [...seenIds].sort().join("\n"));

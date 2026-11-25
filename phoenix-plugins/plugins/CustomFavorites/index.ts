@@ -1,5 +1,5 @@
 // @description Keeps Favorites on this device instead of Discord's servers, synced with the Equicord and Kettu plugins
-// @version 0.2.0
+// @version 0.2.1
 // @author Johnnycyan
 
 /*
@@ -257,6 +257,10 @@ phoenix.discord.onRequest({ method: "PATCH", pathSuffix: SETTINGS_PATH }, req =>
 // pressed, and shows a Nitro upsell. The press is caught and the channel added here instead. The
 // menu doesn't say which channel it is for: the long-press that opened it gives a row index in the
 // channel list, and each row holds a `navigation.channel:<id>` node.
+//
+// The press intercept exists only while such a menu is open. While any plugin intercepts "press",
+// Sunbird hands every press to JS first, and one passed back goes straight to Phoenix, skipping
+// Sunbird's own handlers: buttons that plugins draw (ui.choose dialogs, pages) stop working.
 
 const ADD_ROW_ID = "Add to Favorites";
 const CHANNEL_NODE_PREFIX = "navigation.channel:";
@@ -264,21 +268,19 @@ const CHANNEL_NODE_PREFIX = "navigation.channel:";
 const MENU_WINDOW_MS = 60_000;
 
 let menuChannel: { id: string; at: number; } | null = null;
+let removePressIntercept: (() => void) | null = null;
 
-phoenix.ui.onEvent("rowLongPress", ev => {
+function stopIntercepting() {
+    removePressIntercept?.();
+    removePressIntercept = null;
     menuChannel = null;
-    const index = (ev.payload as { index?: number; } | null)?.index;
-    if (typeof index !== "number") return;
-    const row = phoenix.ui.node(ev.node)?.children[index];
-    const found = row == null ? null : phoenix.ui.findDown(row, { prefix: CHANNEL_NODE_PREFIX }, 4);
-    const id = found == null ? null : phoenix.ui.node(found)?.accessibilityId;
-    if (id) menuChannel = { id: id.slice(CHANNEL_NODE_PREFIX.length), at: Date.now() };
-});
+}
 
-phoenix.ui.onEvent("press", ev => {
-    if (ev.accessibilityId !== ADD_ROW_ID) return false;
+function onMenuPress(ev: Phoenix.ViewEvent) {
     const channel = menuChannel;
-    menuChannel = null;
+    // Any press closes the menu: the next one may be on a plugin's own button
+    stopIntercepting();
+    if (ev.accessibilityId !== ADD_ROW_ID) return false;
     // Unknown channel: leave the press to Phoenix
     if (!channel || Date.now() - channel.at > MENU_WINDOW_MS || !/^\d+$/.test(channel.id)) return false;
     addFavorite(channel.id).catch(e => {
@@ -286,7 +288,22 @@ phoenix.ui.onEvent("press", ev => {
         phoenix.ui.toast("Couldn't add to Favorites");
     });
     return true;
-}, { intercept: true });
+}
+
+phoenix.ui.onEvent("rowLongPress", ev => {
+    stopIntercepting();
+    const index = (ev.payload as { index?: number; } | null)?.index;
+    if (typeof index !== "number") return;
+    const row = phoenix.ui.node(ev.node)?.children[index];
+    const found = row == null ? null : phoenix.ui.findDown(row, { prefix: CHANNEL_NODE_PREFIX }, 4);
+    const id = found == null ? null : phoenix.ui.node(found)?.accessibilityId;
+    if (!id) return;
+    menuChannel = { id: id.slice(CHANNEL_NODE_PREFIX.length), at: Date.now() };
+    removePressIntercept = phoenix.ui.onEvent("press", onMenuPress, { intercept: true });
+});
+
+// Closing the menu without pressing anything
+phoenix.ui.onEvent("dismiss", () => stopIntercepting());
 
 /** Channel type from Phoenix's cache, which keys rows by the id padded to 20 digits */
 async function getChannelType(channelId: string): Promise<number | null> {
@@ -541,6 +558,7 @@ async function start() {
 }
 
 phoenix.onUnload(() => {
+    stopIntercepting();
     sync.stop();
     pendingTimers.clear();
     // Hand Phoenix Discord's favorites back
