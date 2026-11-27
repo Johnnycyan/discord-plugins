@@ -81,6 +81,9 @@ See `valenced-plugins/README.md`. In short: never reuse an imported name for a l
 
 Phoenix is Discord's Rust client in the Android alpha; `phoenix-plugins/` targets it through [Sunbird](https://github.com/sunbird-tools/sunbird).
 
+- Plugins declare permissions in their `// @` header: `// @gateway <events...>` (only those appear on `phoenix.gateway`), `// @discord <METHOD> /path` for request hooks and API calls, `// @fetch <hosts>` (exact or `*.domain`, no catch-all), `// @stores`, `// @ui-tree`, `// @messages`. Anything undeclared is missing or throws.
+- One plugin file serves Android and desktop Sunbird (Windows). Desktop has the same runtime (gateway hooks, `discord.onRequest/onResponse`, `stores.sql`, settings, `ui.choose`), but it stubs the view tree: `ui.onNode`, `mount`, `patchProps` and `onEvent` (except `rowDoubleTap`) do nothing, `ui.node`/`root` return null, and `find`/`findDown` return an empty array. Code that uses the tree must still be correct when those calls do nothing.
+
 - `npm run types` downloads Sunbird's `phoenix.d.ts` (gitignored: Sunbird has no license), the reference for the global `phoenix` API. `npm run build` bundles `plugins/<Name>/index.ts` into `dist/<Name>.js` (IIFE, `// @` metadata lines kept as a banner); `npm run typecheck` runs tsc.
 - Plugins run in QuickJS with no `setTimeout`, `atob`, `TextDecoder` or `AbortController`. Shared code that needs timers takes them from the host (see `Timers` in `CustomFavorites/sync.ts`); `shared-globals.d.ts` only types the globals such code mentions.
 - `phoenix.fetch` gives up after 15 s, so the CustomFavorites sync long-polls with `waitMs` set to 10 s.

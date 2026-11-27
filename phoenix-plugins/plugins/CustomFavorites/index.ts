@@ -1,6 +1,11 @@
 // @description Keeps Favorites on this device instead of Discord's servers, synced with the Equicord and Kettu plugins
-// @version 0.3.4
+// @version 0.4.4
 // @author Johnnycyan
+// @gateway userSettingsProtoUpdate USER_SETTINGS_PROTO_UPDATE ready READY messageCreate typingStart messageAck channelUnreadUpdate
+// @discord * /users/@me/settings-proto/1
+// @fetch discord-fav-sync.johnnycyan.com
+// @stores
+// @ui-tree
 
 /*
  * CustomFavorites for Phoenix (Sunbird).
@@ -11,6 +16,11 @@
  * echoes them as a userSettingsProtoUpdate gateway event, and Phoenix caches what it last applied.
  * This plugin saves the favorites from each PATCH locally and sends Discord its own copy back
  * unchanged, then puts the local favorites into every settings proto Phoenix receives.
+ *
+ * The same file runs on Android and on Windows (desktop Sunbird). Desktop shares the runtime (gateway
+ * hooks, request rewriting, SQL, settings) but stubs out the view tree: ui.onNode, mount and onEvent
+ * do nothing there and ui.node returns null, so server icons and the menu's "Add to Favorites"
+ * catch are Android only.
  */
 
 import { findRestoreIndex, orderedChildren, PlacementHistory, updatePlacementHistory } from "../../../equicord-plugins/CustomFavorites/placement";
@@ -27,7 +37,8 @@ const SETTINGS_PATH = "/users/@me/settings-proto/1";
 
 const log = phoenix.log;
 const storage = phoenix.storage;
-const settingsUpdate = phoenix.gateway.userSettingsProtoUpdate as Phoenix.Sig<SettingsUpdate> | undefined;
+// Android names hook points in camelCase; the raw name is tried too in case a build differs
+const settingsUpdate = (phoenix.gateway.userSettingsProtoUpdate ?? phoenix.gateway.USER_SETTINGS_PROTO_UPDATE) as Phoenix.Sig<SettingsUpdate> | undefined;
 
 interface SettingsUpdate {
     settings?: { type?: number; proto?: string; };
@@ -115,6 +126,20 @@ for (const name of ["messageCreate", "typingStart", "messageAck", "channelUnread
     if (sig) phoenix.on(sig, runDueTimers);
 }
 
+// ---------- Debug log ----------
+
+// Desktop Sunbird keeps plugin logs only in its console, but storage is a file on disk
+// (`sunbird/storage/CustomFavorites.json`), so the last events are kept there for diagnosing.
+const DEBUG_LOG_SIZE = 100;
+
+function debug(event: string, details?: Record<string, unknown>) {
+    try {
+        const list = storage.get<unknown[]>("debugLog") ?? [];
+        list.push({ at: new Date().toISOString(), event, ...details });
+        storage.set("debugLog", list.slice(-DEBUG_LOG_SIZE));
+    } catch { }
+}
+
 // ---------- State ----------
 
 let cache: FavoritesState | null = null;
@@ -175,6 +200,7 @@ async function pushToPhoenix(favorites?: Uint8Array) {
         return;
     }
     const proto = favorites ? setFavoritesBytes(base, favorites) : withLocalFavorites(base);
+    debug("push to Phoenix", { list: favorites ? "given" : "custom", entries: favorites ? undefined : Object.keys(getState().favoriteChannels).length, base: lastSettings ? "last received" : "cache" });
     phoenix.enqueue(settingsUpdate, { settings: { type: 1, proto: toBase64(proto) }, partial: false });
 }
 
@@ -214,8 +240,43 @@ function restorePlacement(before: FavoritesState, after: FavoritesState, history
     order.forEach((id, i) => { after.favoriteChannels[id].position = positions[i]; });
 }
 
+type Entries = FavoritesState["favoriteChannels"];
+
+const entryKey = (e: Entries[string]) => `${e.type}|${e.nickname}|${e.position}|${e.parentId}`;
+
+/** How many entries differ between two lists (missing from one, or changed) */
+function distance(a: Entries, b: Entries) {
+    let count = 0;
+    for (const id of Object.keys(a)) if (!b[id] || entryKey(a[id]) !== entryKey(b[id])) count++;
+    for (const id of Object.keys(b)) if (!a[id]) count++;
+    return count;
+}
+
+/** `edited` was made from `base`: apply only what changed onto `local` */
+function rebase(edited: FavoritesState, base: FavoritesState, local: FavoritesState): FavoritesState {
+    const channels = clone(local.favoriteChannels);
+    for (const id of Object.keys(base.favoriteChannels)) {
+        if (!edited.favoriteChannels[id]) delete channels[id];
+    }
+    for (const [id, entry] of Object.entries(edited.favoriteChannels)) {
+        const was = base.favoriteChannels[id];
+        if (!was || entryKey(was) !== entryKey(entry)) channels[id] = entry;
+    }
+    return { ...edited, favoriteChannels: channels, muted: edited.muted !== base.muted ? edited.muted : local.muted };
+}
+
 function applyPhoenixChange(edited: FavoritesState) {
     const before = getState();
+    // Phoenix can still be showing Discord's favorites (its cache won over the plugin's update), and desktop
+    // sends them along with other settings changes. Saving those as they are would replace the custom list.
+    const official = getOfficialState();
+    const fromLocal = distance(edited.favoriteChannels, before.favoriteChannels);
+    const fromOfficial = official ? distance(edited.favoriteChannels, official.favoriteChannels) : Infinity;
+    debug("PATCH favorites", { entries: Object.keys(edited.favoriteChannels).length, fromLocal, fromOfficial });
+    if (official && fromOfficial < fromLocal) {
+        if (fromOfficial === 0) return;
+        edited = rebase(edited, official, before);
+    }
     const history = getPlacementHistory();
     // Phoenix doesn't know about fields only the other clients set, like guildVisible
     const next: FavoritesState = { ...before, favoriteChannels: edited.favoriteChannels, muted: edited.muted };
@@ -304,6 +365,23 @@ phoenix.ui.onEvent("rowLongPress", ev => {
 
 // Closing the menu without pressing anything
 phoenix.ui.onEvent("dismiss", () => stopIntercepting());
+
+// Desktop Sunbird has no view tree or press events, so the menu path above never runs there.
+// `/favorite` adds the channel it's sent in, past the limit too.
+phoenix.commands.register({
+    name: "favorite",
+    description: "Adds this channel to your custom Favorites",
+    execute(_args, ctx) {
+        if (!ctx.channelId) {
+            phoenix.ui.toast("Open a channel first");
+            return;
+        }
+        addFavorite(ctx.channelId).catch(e => {
+            log.error("Failed to add favorite", e);
+            phoenix.ui.toast("Couldn't add to Favorites");
+        });
+    },
+});
 
 // ---------- Phoenix's cache ----------
 
@@ -491,6 +569,7 @@ function correctShownList(rowNode: number, channelId: string) {
     const now = Date.now();
     if (now - lastCorrection < CORRECTION_INTERVAL_MS) return;
     lastCorrection = now;
+    debug("wrong list on screen", { channelId });
     log.info(`Favorites page shows ${channelId}, which isn't a custom favorite: showing the custom list again`);
     void pushToPhoenix();
 }
@@ -519,9 +598,10 @@ phoenix.ui.onNode({ exact: FAVORITES_MARKER }, () => checkRowsOnScreen());
 // ---------- Settings Phoenix receives ----------
 
 /** Remembers Discord's favorites and the settings base, and returns the proto with local favorites */
-function rewriteIncoming(proto: string, partial: boolean): string | null {
+function rewriteIncoming(proto: string, partial: boolean, source: string): string | null {
     const settings = fromBase64(proto);
     const favorites = getFavoritesBytes(settings);
+    debug("settings received", { source, partial, favorites: favorites ? Object.keys(decodeFavorites(favorites).favoriteChannels).length : null });
     if (favorites) rememberOfficial(favorites);
     else if (partial) return null;
     if (!partial) lastSettings = settings;
@@ -534,7 +614,7 @@ phoenix.discord.onResponse({ pathSuffix: SETTINGS_PATH }, res => {
     try {
         const body = res.json<{ settings?: string; }>();
         if (!body?.settings) return;
-        const settings = rewriteIncoming(body.settings, false);
+        const settings = rewriteIncoming(body.settings, false, `${res.method} reply`);
         if (settings) return { body: { ...body, settings } };
     } catch (e) {
         log.error("Failed to put local favorites into Discord's reply", e);
@@ -547,7 +627,7 @@ if (settingsUpdate) {
             runDueTimers();
             if (payload?.settings?.type !== 1 || !payload.settings.proto) return;
             try {
-                const proto = rewriteIncoming(payload.settings.proto, !!payload.partial);
+                const proto = rewriteIncoming(payload.settings.proto, !!payload.partial, "gateway");
                 if (proto) payload.settings.proto = proto;
             } catch (e) {
                 log.error("Failed to put local favorites into a settings update", e);
@@ -559,10 +639,17 @@ if (settingsUpdate) {
 // READY (at startup and on every reconnect) makes Phoenix apply its cached settings, which can carry
 // Discord's favorites, and no settings proto for favorites follows it. The enqueued update reaches
 // Phoenix just before its next gateway event, so after READY has been applied.
-phoenix.on(phoenix.gateway.ready, () => {
-    runDueTimers();
-    void pushToPhoenix();
-});
+// Desktop's gateway has no `ready` hook point.
+const readySig = (phoenix.gateway.ready ?? phoenix.gateway.READY) as Phoenix.Sig<Phoenix.Ready> | undefined;
+if (readySig) {
+    phoenix.on(readySig, () => {
+        debug("ready");
+        runDueTimers();
+        void pushToPhoenix();
+    });
+} else {
+    log.warn("No ready event in this build, favorites are refreshed only when the plugin starts");
+}
 
 // ---------- Sync ----------
 
@@ -578,6 +665,7 @@ const sync = createSync({
     getConfig: () => ({ url: settings.syncUrl.trim(), token: settings.syncToken.trim() }),
     getLocal: (): SyncData => clone({ state: getState() as SyncData["state"], placementHistory: getPlacementHistory() as SyncData["placementHistory"] }),
     applyRemote(data) {
+        debug("sync applied server list", { entries: Object.keys(data.state?.favoriteChannels ?? {}).length });
         saveState(normalize(data.state) ?? emptyState());
         storage.set("placementHistory", clone(data.placementHistory ?? {}));
         void pushToPhoenix();
@@ -659,6 +747,7 @@ function importOfficial(mode: "replace" | "merge") {
         return;
     }
 
+    debug("import", { mode });
     if (mode === "replace") {
         setState(official);
         storage.set("placementHistory", {});
@@ -721,7 +810,7 @@ const settings = phoenix.settings.define({
     syncUrl: {
         type: "text",
         title: "Sync server URL",
-        description: "Self-hosted, see the sync-server folder. Leave empty to not sync.",
+        description: "Self-hosted, see the sync-server folder. Its host must be on the plugin's // @fetch line. Leave empty to not sync.",
         default: "",
         onChange: startSync,
     },
@@ -759,6 +848,7 @@ const settings = phoenix.settings.define({
 // ---------- Lifecycle ----------
 
 async function start() {
+    debug("start", { entries: Object.keys(getState().favoriteChannels).length, hookPoints: Object.keys(phoenix.gateway), settingsUpdate: !!settingsUpdate, ready: !!readySig });
     // First run: Phoenix's cache still holds Discord's own favorites
     if (!storage.get("official")) {
         const base = await getSettingsBase();
