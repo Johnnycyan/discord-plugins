@@ -1,5 +1,5 @@
 // @description Keeps Favorites on this device instead of Discord's servers, synced with the Equicord and Kettu plugins
-// @version 0.3.3
+// @version 0.3.4
 // @author Johnnycyan
 
 /*
@@ -478,13 +478,43 @@ function removeIcons() {
     iconMounts.clear();
 }
 
+/** When the list was last pushed because the Favorites page showed the wrong one */
+let lastCorrection = 0;
+const CORRECTION_INTERVAL_MS = 3000;
+
+/**
+ * Phoenix sometimes shows Discord's favorites anyway (its cached copy, applied after the plugin's).
+ * A channel on the Favorites page that isn't a local favorite gives that away: push the local list again.
+ */
+function correctShownList(rowNode: number, channelId: string) {
+    if (getState().favoriteChannels[channelId] || !inFavoritesList(rowNode)) return;
+    const now = Date.now();
+    if (now - lastCorrection < CORRECTION_INTERVAL_MS) return;
+    lastCorrection = now;
+    log.info(`Favorites page shows ${channelId}, which isn't a custom favorite: showing the custom list again`);
+    void pushToPhoenix();
+}
+
+function onChannelRow(rowNode: number, channelId: string) {
+    correctShownList(rowNode, channelId);
+    void mountGuildIcon(rowNode, channelId).catch(e => log.error("Failed to show a server icon", e));
+}
+
+/** Rows already on screen get no onNode call (e.g. the plugin loaded with the Favorites page open) */
+function checkRowsOnScreen() {
+    for (const id of phoenix.ui.find({ prefix: CHANNEL_NODE_PREFIX })) {
+        const channelId = phoenix.ui.node(id)?.accessibilityId?.slice(CHANNEL_NODE_PREFIX.length);
+        if (channelId) onChannelRow(id, channelId);
+    }
+}
+
 phoenix.ui.onNode({ prefix: CHANNEL_NODE_PREFIX }, n => {
     const channelId = n.accessibilityId?.slice(CHANNEL_NODE_PREFIX.length);
-    if (channelId) void mountGuildIcon(n.id, channelId).catch(e => log.error("Failed to show a server icon", e));
+    if (channelId) onChannelRow(n.id, channelId);
 });
 
 // In case the Favorites page's marker shows up after its first rows
-phoenix.ui.onNode({ exact: FAVORITES_MARKER }, () => mountIconsOnScreen());
+phoenix.ui.onNode({ exact: FAVORITES_MARKER }, () => checkRowsOnScreen());
 
 // ---------- Settings Phoenix receives ----------
 
@@ -525,6 +555,14 @@ if (settingsUpdate) {
         },
     });
 }
+
+// READY (at startup and on every reconnect) makes Phoenix apply its cached settings, which can carry
+// Discord's favorites, and no settings proto for favorites follows it. The enqueued update reaches
+// Phoenix just before its next gateway event, so after READY has been applied.
+phoenix.on(phoenix.gateway.ready, () => {
+    runDueTimers();
+    void pushToPhoenix();
+});
 
 // ---------- Sync ----------
 
@@ -728,6 +766,7 @@ async function start() {
         if (favorites) rememberOfficial(favorites);
     }
     await pushToPhoenix();
+    checkRowsOnScreen();
     await maybeOfferImport();
 }
 
